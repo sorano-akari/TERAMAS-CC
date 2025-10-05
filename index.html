@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TERAMAS-CC: バックグラウンドノイズ計測</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; margin: 20px; background-color: #f4f4f4; }
+        h1 { color: #333; }
+        #controls { margin-bottom: 20px; }
+        /* カメラ映像とCanvasを重ねて表示することも可能ですが、ここではシンプルに並べます */
+        #videoElement { display: none; /* ユーザーには生の映像は基本的に不要なので非表示 */ }
+        #canvasElement { border: 2px solid #0056b3; background-color: black; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <h1>TERAMAS-CC: バックグラウンドノイズ計測</h1>
+    <div id="status">
+        [準備完了] 「BG計測開始」ボタンを押してください。<br>
+        **注意:** 測定中はカメラのレンズを完全に遮光してください。
+    </div>
+
+    <div id="controls">
+        <button onclick="main()" id="startButton">BG計測開始 (約5分)</button>
+    </div>
+
+    <video id="videoElement" playsinline autoplay muted></video>
+
+    <canvas id="canvasElement"></canvas>
+
+    <script src="detector_core.js"></script> 
+    
+    <script src="teramas-cc.js"></script>
+</body>
+</html>
