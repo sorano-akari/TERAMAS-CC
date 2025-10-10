@@ -7,19 +7,29 @@
     <!-- 以前存在した外部CSS参照は、描画エラー回避のため削除されました。 -->
     
     <style>
-        /* CSSの統合 (teramas-cc.jsにあったスタイルを統合) */
+        /* CSSの統合 (ダークモードの再適用) */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+        
+        :root {
+            --color-background: #1A1A1A; /* 全体の背景 */
+            --color-panel: #2C2C2C; /* パネルの背景 */
+            --color-text: #E0E0E0; /* 主要な文字色 */
+            --color-primary: #654ff0; /* メインカラー（ボタン、ハイライト） */
+            --color-canvas-bg: #444444; /* プログレスバーの背景 */
+            --color-canvas-fg: #00AA40; /* プログレスバーの色 */
+        }
+
         body {
             font-family: 'Inter', sans-serif;
-            background-color: #f4f7f9;
-            color: #333;
+            background-color: var(--color-background);
+            color: var(--color-text);
             padding: 20px;
             display: flex;
             flex-direction: column;
             align-items: center;
         }
         #main-header {
-            color: #654ff0;
+            color: var(--color-primary);
             margin-bottom: 20px;
         }
         #main-container {
@@ -43,7 +53,7 @@
             background-color: #000;
             border-radius: 12px;
             overflow: hidden;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 0 15px rgba(0, 0, 0, 0.5); /* 影もダークに */
             aspect-ratio: 4/3; /* 640x480 */
         }
         #camera-video, #processing-canvas {
@@ -56,18 +66,25 @@
             position: absolute;
             top: 0;
             left: 0;
-            opacity: 1.0; /* 描画確認のため1.0に設定 */
+            opacity: 1.0; 
             z-index: 10;
         }
         #control-panel, .status-box, #display-mode-panel {
-            background-color: #ffffff;
+            background-color: var(--color-panel);
+            color: var(--color-text);
             padding: 20px;
             border-radius: 12px;
             margin-top: 20px;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+        h2 {
+            color: var(--color-text);
+            border-bottom: 1px solid #444;
+            padding-bottom: 8px;
+            margin-top: 0;
         }
         button {
-            background-color: #654ff0;
+            background-color: var(--color-primary);
             color: white;
             padding: 10px 15px;
             border: none;
@@ -82,7 +99,8 @@
             background-color: #4f3dbd;
         }
         button:disabled {
-            background-color: #ccc;
+            background-color: #444;
+            color: #888;
             cursor: not-allowed;
         }
         .factor-display {
@@ -93,7 +111,8 @@
             font-weight: bold;
         }
         #correction-graph {
-            border: 1px solid #eee;
+            background-color: var(--color-canvas-bg);
+            border: 1px solid #444;
             border-radius: 6px;
         }
         .radio-group {
@@ -106,15 +125,19 @@
         }
         .radio-group label {
             padding: 8px 12px;
-            border: 1px solid #ddd;
+            border: 1px solid #444;
             border-radius: 6px;
             cursor: pointer;
             transition: background-color 0.2s, border-color 0.2s;
         }
         .radio-group input[type="radio"]:checked + label {
-            background-color: #654ff0;
+            background-color: var(--color-primary);
             color: white;
-            border-color: #654ff0;
+            border-color: var(--color-primary);
+        }
+        #log-area {
+            background-color: #111;
+            border: 1px solid #444;
         }
         
         /* Responsive Design */
@@ -194,7 +217,7 @@
             <!-- ログストリーム -->
             <div class="status-box">
                 <h2>システムログ</h2>
-                <div id="log-area" style="height: 200px; overflow-y: scroll; background-color: #2c3e50; color: #ecf0f1; padding: 10px; border-radius: 6px;">
+                <div id="log-area" style="height: 200px; overflow-y: scroll; background-color: #111; color: #ecf0f1; padding: 10px; border-radius: 6px;">
                     <div id="log-stream"></div>
                 </div>
             </div>

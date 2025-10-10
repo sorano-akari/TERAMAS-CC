@@ -1,86 +1,98 @@
-/* style.css - WebAssembly放射線計測デモ用基本スタイル */
+/* Google Fonts: Inter を使用 */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
 
-/* ---------------------------------------------------- */
-/* 基本設定 - ダークテーマをベースに再構築 */
-/* ---------------------------------------------------- */
 :root {
-    --primary-color: #9333ea;    /* ボタンの基本色 (紫) */
-    --secondary-color: #3f3f46;   /* カードの背景色 (Neutral-700相当) */
-    --success-color: #10b981;    /* 成功/アクティブなボタンの色 (緑) */
-    --error-color: #ef4444;      /* エラー表示の色 (赤) */
-    --wait-color: #fbbf24;       /* 待機/処理中の色 (黄色) */
-    --bg-color: #1f2937;         /* メインの背景色 (Gray-800相当) */
-    --text-color: #f3f4f6;       /* 文字色 (Gray-100相当) */
-    --log-bg-color: #374151;     /* ログエリアの背景色 (Gray-700相当) */
-    --border-color: #4b5563;     /* ボーダーの色 (Gray-600相当) */
-    --header-color: #2563eb;     /* タイトルの色 (青) */
-    --progress-height: 12px;
+    /* ダークモードのカラーパレット */
+    --color-background: #1A1A1A; /* 濃いグレー */
+    --color-surface: #2C2C2C;    /* カード背景 */
+    --color-text: #E0E0E0;      /* 明るいテキスト */
+    --color-accent: #4CAF50;    /* 緑（進捗バー、成功） */
+    --color-accent-dark: #388E3C;
+    --color-border: #444;       /* 境界線 */
+    --color-warning: #FFC107;   /* 警告 */
+    --color-error: #F44336;     /* エラー */
+    --color-button-bg: #444;    /* ボタン背景 */
+    --color-button-hover: #555; /* ボタンホバー */
 }
 
-body {
-    font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif;
-    background-color: var(--bg-color);
-    color: var(--text-color);
+* {
+    box-sizing: border-box;
+    font-family: 'Inter', sans-serif;
+    color: var(--color-text); /* 基本テキストカラーを適用 */
+}
+
+body, html {
     margin: 0;
-    padding: 20px;
-    line-height: 1.6;
+    padding: 0;
+    background-color: var(--color-background);
+    min-height: 100vh;
     display: flex;
     flex-direction: column;
-    align-items: center;
 }
 
-/* ---------------------------------------------------- */
-/* ヘッダーとレイアウト */
-/* ---------------------------------------------------- */
 #main-header {
-    color: var(--header-color);
-    margin-bottom: 20px;
-    font-size: 2.5em;
-    font-weight: 800;
+    text-align: center;
+    padding: 20px 0 10px;
+    color: var(--color-accent);
+    font-weight: 700;
 }
 
 #lang-switch-button {
     position: absolute;
-    top: 20px;
-    right: 20px;
-    background: var(--secondary-color);
-    color: var(--text-color);
-    border: 1px solid var(--border-color);
-    padding: 8px 15px;
+    top: 15px;
+    right: 15px;
+    padding: 5px 10px;
+    background-color: var(--color-button-bg);
+    border: 1px solid var(--color-border);
     border-radius: 4px;
     cursor: pointer;
     transition: background-color 0.2s;
-    font-size: 0.9em;
 }
 
 #lang-switch-button:hover {
-    background-color: #3f3f46;
+    background-color: var(--color-button-hover);
 }
 
+/* メインコンテナのレイアウト */
 #main-container {
     display: flex;
-    gap: 30px;
-    width: 100%;
-    max-width: 1300px;
-}
-
-#left-panel, #right-panel {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
+    justify-content: center;
     gap: 20px;
+    padding: 20px;
+    flex-wrap: wrap; /* モバイル対応 */
+    margin: auto;
+    width: 95%;
+    max-width: 1200px;
 }
 
-/* ---------------------------------------------------- */
-/* 動画・キャンバス */
-/* ---------------------------------------------------- */
+/* パネル（左：映像、右：情報） */
+#left-panel, #right-panel {
+    padding: 15px;
+    background-color: var(--color-surface);
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+}
+
+#left-panel {
+    flex: 2;
+    min-width: 300px;
+}
+
+#right-panel {
+    flex: 1;
+    min-width: 300px;
+    max-width: 400px;
+}
+
+/* 映像コンテナ */
 #video-container {
     position: relative;
     width: 100%;
-    padding-top: 75%; 
+    /* 16:9のアスペクト比を維持 */
+    padding-top: 56.25%; /* 9 / 16 * 100 */
+    margin-bottom: 15px;
     background-color: #000;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: 6px;
     overflow: hidden;
 }
 
@@ -90,264 +102,114 @@ body {
     left: 0;
     width: 100%;
     height: 100%;
-    object-fit: contain;
+    object-fit: cover;
+    border-radius: 6px;
 }
 
-#processing-canvas {
-    z-index: 10;
-}
-
-/* ---------------------------------------------------- */
-/* コントロールパネル (ボタン) */
-/* ---------------------------------------------------- */
+/* コントロールパネル */
 #control-panel {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
-    padding: 10px 0;
-    align-items: center; 
+    margin-bottom: 20px;
 }
 
 #control-panel button {
-    /* 🚨 修正1: 最小高さを確保（前回の設定を維持） */
-    min-height: 50px; 
-    
-    /* 🚨 修正2: Flexboxでテキストを中央に配置 */
-    display: flex; 
-    justify-content: center;
-    align-items: center;
-    
-    /* 🚨 修正3: paddingを上下均等に調整し、高さを確保 */
-    padding: 10px 15px; 
-    
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    font-weight: bold;
-    transition: background-color 0.2s, opacity 0.2s, box-shadow 0.2s;
     flex-grow: 1;
-    min-width: 150px; 
-    font-size: 1em;
-    /* 🚨 修正4: テキストカラーを確実に白系に設定 */
-    color: var(--text-color); 
-    
-    /* 🚨 修正5: テキストが改行された際も中央配置を維持 */
-    text-align: center;
-    
-    /* 🚨 修正6: オーバーフローを避けるため、高さ固定の代わりにmin-heightを使う */
-    /* line-height: 1.2; */ /* 必要であれば行間を狭くする */
-    white-space: normal; /* テキストの折り返しを許可 */
+    padding: 10px 15px;
+    font-weight: 600;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    background-color: var(--color-button-bg);
+    transition: background-color 0.2s, color 0.2s;
+}
+
+#control-panel button:hover:enabled {
+    background-color: var(--color-button-hover);
 }
 
 #control-panel button:disabled {
-    opacity: 0.5;
+    background-color: #333;
+    color: #888;
     cursor: not-allowed;
-    background-color: var(--secondary-color);
 }
 
-/* 各ボタンのスタイル */
-#preliminary-measurement-button {
-    background-color: var(--primary-color); 
-    color: var(--text-color); 
-}
-#preliminary-measurement-button:hover:not(:disabled) {
-    background-color: #a855f7;
-}
-
-#start-measurement-button {
-    background-color: var(--success-color);
-    color: var(--bg-color); /* 黒に近い色にして、緑の背景に目立たせる */
-}
-#start-measurement-button:hover:not(:disabled) {
-    background-color: #059669;
-}
-
-#reset-button {
-    background-color: var(--error-color);
-    color: var(--text-color);
-}
-#reset-button:hover:not(:disabled) {
-    background-color: #dc2626;
-}
-
-#dedicated-window-button {
-    background-color: var(--log-bg-color);
-    color: var(--text-color);
-    border: 1px solid var(--border-color);
-}
-#dedicated-window-button:hover:not(:disabled) {
-    background-color: #4b5563;
-}
-
-
-/* ---------------------------------------------------- */
-/* ステータスとログ */
-/* ---------------------------------------------------- */
-
-.status-box {
-    background-color: var(--secondary-color);
-    padding: 20px;
-    border-radius: 8px;
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-}
-
-.status-box h2 {
-    color: var(--text-color);
-    font-size: 1.2em;
-    margin-top: 0;
-    padding-bottom: 10px;
-    border-bottom: 1px solid var(--border-color);
-}
-
-#progress-status {
-    background-color: var(--log-bg-color);
-    color: var(--text-color);
-    padding: 15px;
-    border-radius: 6px;
-    font-weight: bold;
-    font-size: 1.1em;
-    text-align: center;
-    border: 2px solid var(--border-color);
-    margin-bottom: 15px; 
-}
-
-/* 係数表示 */
-.factor-display {
-    display: flex;
-    justify-content: space-between;
-    font-size: 1.1em;
-    padding: 5px 0;
-    border-bottom: 1px dotted var(--border-color);
-}
-.factor-display:last-child {
-    border-bottom: none;
-}
-.factor-display span:last-child {
-    font-weight: bold;
-    color: var(--success-color); 
-}
-
-/* グラフエリア */
-#correction-graph {
-    width: 100%;
-    background-color: var(--log-bg-color);
-    border-radius: 4px;
-    margin-top: 10px;
-}
-
-
-/* ---------------------------------------------------- */
-/* ログストリーム */
-/* ---------------------------------------------------- */
-
-#log-area {
-    margin-bottom: 0;
-}
-
-#log-stream {
-    height: 250px; 
-    overflow-y: scroll;
-    background-color: var(--log-bg-color);
-    border: 1px solid var(--border-color);
+/* ラジオボタンとステータスボックス */
+.status-box, #display-mode-panel {
+    margin-bottom: 20px;
     padding: 10px;
-    border-radius: 4px;
-    display: flex;
-    flex-direction: column-reverse; 
-    justify-content: flex-end;
-}
-#log-stream::-webkit-scrollbar {
-    width: 8px;
-}
-#log-stream::-webkit-scrollbar-thumb {
-    background-color: var(--border-color);
-    border-radius: 4px;
+    background-color: #333; /* より濃いサーフェス */
+    border-radius: 6px;
 }
 
-.log-entry {
-    padding: 4px 0;
-    border-bottom: 1px dotted var(--border-color);
-    font-size: 0.85em;
-    color: #cbd5e1;
-}
-.log-entry:last-child {
-    border-bottom: none;
-}
-.log-success { color: var(--success-color); }
-.log-error { color: var(--error-color); font-weight: bold; }
-.log-wait { color: var(--wait-color); }
-.log-info { color: #60a5fa; }
-
-/* ---------------------------------------------------- */
-/* 画像表示モードパネル (新規追加) */
-/* ---------------------------------------------------- */
-
-#display-mode-panel {
-    /* control-panelと同じくカード形式でまとめる */
-    background-color: var(--secondary-color);
-    padding: 15px;
-    border-radius: 8px;
-    /* control-panelの下に配置するための上マージン */
-    margin-top: 15px; 
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-}
-
-#header-display-mode {
+.status-box h2, #display-mode-panel h2 {
+    color: var(--color-text);
     font-size: 1.1em;
-    margin-bottom: 10px;
-    color: var(--text-color);
-    border-bottom: 1px solid var(--border-color);
+    margin-top: 0;
     padding-bottom: 5px;
-    font-weight: 600;
+    border-bottom: 1px solid var(--color-border);
 }
 
 .radio-group {
-    /* ラジオボタンを横に並べるためのFlexbox */
     display: flex;
-    gap: 10px;
     flex-wrap: wrap;
-    justify-content: flex-start;
+    gap: 10px;
 }
 
 .radio-group input[type="radio"] {
-    /* デフォルトのラジオボタンを非表示にし、ラベルをボタンのように使う */
-    display: none; 
+    display: none;
 }
 
 .radio-group label {
-    cursor: pointer;
     padding: 8px 12px;
-    border-radius: 20px;
-    background-color: #374151; /* Gray-700 (非選択時の背景) */
-    color: var(--text-color);
-    transition: all 0.2s ease;
-    border: 1px solid var(--border-color);
-    font-size: 0.85em;
-    user-select: none;
+    background-color: var(--color-button-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+    font-size: 0.9em;
 }
 
 .radio-group input[type="radio"]:checked + label {
-    /* 選択されたボタンの色をメインカラーにする */
-    background-color: var(--primary-color); 
-    border-color: var(--primary-color);
-    font-weight: bold;
-    color: white;
+    background-color: var(--color-accent);
+    color: #1A1A1A;
+    font-weight: 600;
 }
 
-.radio-group label:hover {
-    background-color: #4b5563; /* Gray-600 (ホバー時) */
+/* 補正係数表示 */
+.factor-display {
+    display: flex;
+    justify-content: space-between;
+    padding: 5px 0;
+    border-bottom: 1px dashed #555;
+    font-size: 0.9em;
 }
 
-/* ---------------------------------------------------- */
-/* レスポンシブ対応 (画面幅が狭い場合) */
-/* ---------------------------------------------------- */
-@media (max-width: 1000px) {
+#g-r-factor, #b-r-factor {
+    font-weight: 700;
+    color: var(--color-accent); /* 係数自体は強調 */
+}
+
+/* プログレスバーのCanvas */
+#correction-graph {
+    width: 100%;
+    /* Canvasの背景を暗い色にして、白文字が見えるようにする */
+    background-color: #444; 
+    border-radius: 4px;
+}
+
+/* モバイル対応 */
+@media (max-width: 768px) {
     #main-container {
         flex-direction: column;
-        gap: 20px;
+        padding: 10px;
     }
-
-    #left-panel, #right-panel {
-        flex-basis: auto;
-        width: 100%;
+    #right-panel {
+        max-width: none;
+        order: -1; /* モバイルでは情報パネルを上に */
+    }
+    #left-panel {
+        padding: 10px;
     }
 }

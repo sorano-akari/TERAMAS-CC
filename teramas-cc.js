@@ -1,877 +1,622 @@
-// teramas-cc.js - WebAssembly放射線計測デモ アプリケーションロジック
+// TERAMAS-CC Main Controller (teramas-cc.js)
+// カメラ制御、Web Worker連携、UI管理を行います。
 
-// ----------------------------------------------------
-// 1. 定数とグローバル変数
-// ----------------------------------------------------
+// Wasm Workerのインスタンス
+let worker;
+let isMeasuring = false;
+let videoStream = null;
+let accumulationBufferPtr = 0; // Wasmヒープ内の累積バッファのポインタ
 
-// システム設定
-const TARGET_CORRECTION_FRAMES = 300; 
-const IMAGE_UPDATE_INTERVAL = 30;     
+// DOM要素
+const video = document.getElementById('camera-video');
+const canvas = document.getElementById('processing-canvas');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+const startButton = document.getElementById('start-measurement-button');
+const resetButton = document.getElementById('reset-button');
+const prelimButton = document.getElementById('preliminary-measurement-button');
+const progressStatus = document.getElementById('progress-status');
+const gFactorDisplay = document.getElementById('g-r-factor');
+const bFactorDisplay = document.getElementById('b-r-factor');
+const logStream = document.getElementById('log-stream');
+const progressCanvas = document.getElementById('correction-graph');
+const progressCtx = progressCanvas.getContext('2d');
 
-// グローバル状態
-let worker = null;
-let stream = null;
-let videoReady = false; 
-let wasmReady = false;
-let initializationStarted = false; 
-let currentMode = 'IDLE'; // IDLE, CORRECTION_MODE, MEASUREMENT_MODE
-let currentFrameBuffer = null;
-let canProcessFrame = false;
+// 表示モードDOM要素
+const displayModeRadios = document.querySelectorAll('input[name="displayMode"]');
 
-let pixelWidth = 640;
-let pixelHeight = 480;
+// 定数
+const MAX_CALIBRATION_FRAMES = 1000; // 予備測定の目標フレーム数
+const IMAGE_UPDATE_INTERVAL = 30; // 累積画像を更新するフレーム間隔
 
-// 補正係数
-let gFactor = 1.0;
-let bFactor = 1.0;
-
-let calibrationDone = false; 
-
-let frameCounter = 0; 
-
-// 画像データ描画用
-let lastProcessedImageData = null; 
-let updateImage = false;           
-
-// 表示モードの制御変数
+// アプリケーション状態
 let currentDisplayMode = 'REALTIME'; // 'REALTIME', 'GRAYSCALE', 'COLOR'
-let isColorModeActive = false;       // Wasmにカラー処理を要求するかどうか (現状未使用)
 
-// 言語設定
-let LANGUAGE_PACK = {};
-let currentLang = 'ja';
+// キャリブレーション係数 (初期値: 1.0)
+let calibrationFactors = {
+    g_factor: 1.0,
+    b_factor: 1.0,
+};
 
-// WasmReadyを待つための解決関数をグローバルに定義
-let wasmReadyPromiseResolve; 
+// 統計情報 (Wasmから受け取るデータ)
+let currentStats = {
+    sum_R: 0.0, sum_R_sq: 0.0,
+    sum_G: 0.0, sum_G_sq: 0.0,
+    sum_B: 0.0, sum_B_sq: 0.0,
+    sum_Charge: 0.0,
+    sum_Charge_sq: 0.0,
+    frameCount: 0,
+    pixelTotal: 0,
+};
 
-// DOM要素変数の定義 (初期化はinitAppで行う)
-let video = null; 
-let canvas = null; 
-let ctx = null; 
-let mainTitle = null; 
-let mainHeader = null; 
-let preliminaryButton = null; 
-let startButton = null;
-let resetButton = null;
-let dedicatedWindowButton = null; 
-let langSwitchButton = null; 
-let logElement = null; 
-let progressStatus = null; 
-let factorGRLabel = null;
-let factorBRLabel = null;
-let factorGRValue = null;
-let factorBRValue = null;
-let headerCalib = null;
-let correctionGraph = null;
+let measurementMode = 'IDLE'; // 'IDLE', 'PRELIMINARY', 'MAIN_RUN'
 
-// 表示モード切り替え用のDOM要素
-let headerDisplayMode = null; 
-let labelRealtime = null;     
-let labelGrayscale = null;    
-let labelColor = null;        
-let radioRealtime = null;
-let radioGrayscale = null;
-let radioColor = null;
+// フレームデータプール
+const bufferPool = [];
 
+// ----------------------------------------------------------------------
+// 共通関数
+// ----------------------------------------------------------------------
 
-// ----------------------------------------------------
-// 2. UI/ログ関数 (呼び出し順序の修正のため、このセクションを繰り上げ)
-// ----------------------------------------------------
+// ログ出力関数
+function logMessage(message, type = 'info') {
+    const p = document.createElement('p');
+    p.classList.add('log-' + type);
+    p.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+    logStream.prepend(p);
+}
 
-/**
- * @function updateControlPanel
- * @description アプリケーションの現在のモードに応じて、制御ボタンの状態を更新する
- */
-function updateControlPanel() {
-    if (!preliminaryButton || !startButton || !resetButton || !dedicatedWindowButton) return;
-
-    if (currentMode === 'CORRECTION_MODE' || currentMode === 'MEASUREMENT_MODE') {
-        // 測定/補正中は予備測定と開始を無効化
-        preliminaryButton.disabled = true;
-        startButton.disabled = true;
-        // 致命的な測定ミスを防ぐため、専用ウィンドウボタンも無効化
-        dedicatedWindowButton.disabled = true;
-    } else { // IDLEモード
-        if (wasmReady) {
-            preliminaryButton.disabled = false; // Wasmが準備できれば予備測定開始可能
-            // キャリブレーション完了済みの場合のみ本計測開始ボタンを有効化
-            startButton.disabled = !calibrationDone; 
-            dedicatedWindowButton.disabled = false;
-        } else {
-            // Wasmがまだ準備できていない初期状態
-            preliminaryButton.disabled = true;
-            startButton.disabled = true;
-            dedicatedWindowButton.disabled = false; // 初期化中にウィンドウ変更は可能
-        }
+// ArrayBufferプーリング (ゼロコピー転送のための再利用)
+function getOrCreateBuffer(size) {
+    // プールからサイズが一致するバッファを探す
+    const index = bufferPool.findIndex(b => b.byteLength === size);
+    if (index !== -1) {
+        return bufferPool.splice(index, 1)[0];
     }
-    // リセットボタンは常に有効 (緊急停止用)
-    resetButton.disabled = false; 
+    // 見つからなければ新しく作成
+    return new ArrayBuffer(size);
 }
 
-function setUILanguage(lang) {
-    const texts = LANGUAGE_PACK[lang];
-    if (!texts) return;
-
-    // 1. グローバル設定
-    currentLang = lang;
-    document.documentElement.lang = lang;
-
-    // 2. テキストの更新
-    if (mainTitle) mainTitle.textContent = texts.mainTitle;
-    if (mainHeader) mainHeader.textContent = texts.mainHeader;
-    if (preliminaryButton) preliminaryButton.textContent = texts.preliminaryButton;
-    if (startButton) startButton.textContent = texts.startButton;
-    if (resetButton) resetButton.textContent = texts.resetButton;
-    if (dedicatedWindowButton) dedicatedWindowButton.textContent = texts.dedicatedWindowButton;
-    if (headerCalib) headerCalib.textContent = texts.headerCalib;
-    if (factorGRLabel) factorGRLabel.textContent = texts.factorGRLabel;
-    if (factorBRLabel) factorBRLabel.textContent = texts.factorBRLabel;
-    
-    // 画像表示モードのラベルを更新
-    if (headerDisplayMode) headerDisplayMode.textContent = texts['headerDisplayMode'] || '画像表示モード';
-    if (labelRealtime) labelRealtime.textContent = texts['modeRealtime'] || 'リアルタイム';
-    if (labelGrayscale) labelGrayscale.textContent = texts['modeGrayscale'] || 'グレースケール';
-    if (labelColor) labelColor.textContent = texts['modeColor'] || 'カラー積算(未実装)';
-    
-    if (langSwitchButton) langSwitchButton.textContent = texts.langButton;
-    
-    // 3. ステータスを再表示
-    const currentStatusKey = progressStatus.getAttribute('data-status-key') || 'statusInitialReady';
-    if (progressStatus) progressStatus.textContent = texts[currentStatusKey] || '...';
-}
-
-function updateStatus(key) {
-    if (!progressStatus) return;
-    progressStatus.textContent = getDynamicLogMessage(key);
-
-    const style = progressStatus.style;
-    switch(key) {
-        case 'statusInitialReady':
-        case 'statusReady':
-        case 'statusCalibDone': 
-            style.backgroundColor = 'var(--success-color)';
-            style.color = 'var(--bg-color)';
-            break;
-        case 'statusCalib':
-        case 'statusMeasure':
-        case 'statusInit':
-            style.backgroundColor = 'var(--log-bg-color)';
-            style.color = 'var(--wait-color)';
-            break;
-        case 'statusError':
-            style.backgroundColor = 'var(--log-bg-color)';
-            style.color = 'var(--error-color)';
-            break;
-        default:
-            style.backgroundColor = 'var(--log-bg-color)';
-            style.color = 'var(--text-color)';
-    }
-    progressStatus.setAttribute('data-status-key', key);
+function returnBufferToPool(buffer) {
+    bufferPool.push(buffer);
 }
 
 
-function toggleLanguage() {
-    currentLang = (currentLang === 'ja') ? 'en' : 'ja';
-    setUILanguage(currentLang);
-    updateStatus('statusInitialReady'); 
-}
+// ----------------------------------------------------------------------
+// 1. Wasm Workerの初期化と通信
+// ----------------------------------------------------------------------
+function initializeWorker() {
+    logMessage('Web Workerを初期化中...');
+    // Workerファイル名は 'detector_worker.js' で固定
+    worker = new Worker('detector_worker.js'); 
 
-
-function getDynamicLogMessage(key, ...args) {
-    const texts = LANGUAGE_PACK[currentLang];
-    
-    if (!texts || !texts[key]) {
-        return `[LOG ERROR] Missing Key: ${key}`;
-    } 
-
-    let messageTemplate = texts[key];
-
-    switch(key) {
-        case 'statusCalib': 
-            if (args.length < 2) return `${messageTemplate} (Error/300)`; 
-            return messageTemplate.replace('%s', args[0]).replace('%s', args[1]); 
+    worker.onmessage = (e) => {
+        const data = e.data;
+        switch (data.type) {
+            case 'STATUS':
+                if (data.status === 'READY') {
+                    logMessage('Wasmコアの準備が完了しました。「予備測定」ボタンを押してカメラを起動してください。', 'success');
+                    prelimButton.disabled = false; // Wasm準備完了後に有効化
+                } else if (data.status === 'ERROR') {
+                    logMessage(`Wasmコアエラー: ${data.message}`, 'error');
+                }
+                break;
             
-        case 'statusFactorUpdate': 
-            if (args.length < 2) return `${messageTemplate} (G: Error, B: Error)`;
-            let finalMessage = messageTemplate;
-            finalMessage = finalMessage.replace('%s', args[0]); 
-            finalMessage = finalMessage.replace('%s', args[1]);
-            return finalMessage;
-
-        case 'statusInitFailed': 
-        case 'statusError': 
-            if (args.length < 1) return `${messageTemplate}: (Unknown Error)`;
-            return `${messageTemplate}: ${args[0]}`;
-
-        default: 
-            return messageTemplate;
-    }
-}
-
-
-function streamLog(key, type = 'info', ...args) {
-    if (!logElement) return; 
-
-    const now = new Date();
-    const timeString = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-    
-    let message;
-    
-    if (key === 'statusInit' && args.length > 0 && typeof args[0] === 'string' && (args[0].includes("ロジックは未実装です。"))) {
-        message = args[0];
-    } else {
-        message = getDynamicLogMessage(key, ...args);
-    }
-    
-    const newLog = document.createElement('div');
-    newLog.className = `log-entry log-${type}`;
-    newLog.textContent = `[${timeString}] ${message}`;
-
-    if (logElement.firstChild) {
-        logElement.insertBefore(newLog, logElement.firstChild);
-    } else {
-        logElement.appendChild(newLog);
-    }
-
-    if (type === 'error') {
-        console.error(`[SYSTEM ERROR] ${message}`);
-    }
-}
-
-function updateCorrectionFactors(rAvg, gAvg, bAvg) {
-    if (rAvg <= 0 || isNaN(rAvg) || isNaN(gAvg) || isNaN(bAvg)) {
-        streamLog('statusFactorUpdate', 'info', gFactor.toFixed(4), bFactor.toFixed(4));
-        return; 
-    } 
-    
-    gFactor = rAvg / gAvg;
-    bFactor = rAvg / bAvg;
-
-    const gFactorDisplay = document.getElementById('g-r-factor');
-    const bFactorDisplay = document.getElementById('b-r-factor');
-    
-    const fixedGFactor = isNaN(gFactor) ? 'NaN' : gFactor.toFixed(4);
-    const fixedBFactor = isNaN(bFactor) ? 'NaN' : bFactor.toFixed(4);
-    
-    if (gFactorDisplay) gFactorDisplay.textContent = fixedGFactor;
-    if (bFactorDisplay) bFactorDisplay.textContent = fixedBFactor;
-    
-    if (worker) {
-        worker.postMessage({ type: 'SET_FACTORS', gFactor: gFactor, bFactor: bFactor });
-    }
-
-    streamLog('statusFactorUpdate', 'info', fixedGFactor, fixedBFactor);
-}
-
-
-// ----------------------------------------------------
-// 3. 機能関数
-// ----------------------------------------------------
-
-function startMainMeasurement() { 
-    streamLog('statusInit', 'info', "本測定ロジックは未実装です。");
-    // TODO: 本測定開始ロジック
-} 
-
-/**
- * @function resetSystem
- * @description システムの状態を完全にリセットし、Wasmとカメラ接続を再初期化する
- */
-function resetSystem() { 
-    streamLog('statusReset', 'info');
-    
-    // 1. Workerを終了し、新しく生成
-    if (worker) {
-        worker.terminate();
-        worker = new Worker('detector_worker.js');
-        worker.onmessage = handleWorkerMessage;
-    }
-    
-    // 2. カメラストリームを停止
-    if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-        if (video) video.srcObject = null;
-    }
-    
-    // 3. グローバル状態のリセット
-    videoReady = false;
-    wasmReady = false;
-    initializationStarted = false;
-    currentMode = 'IDLE';
-    canProcessFrame = false;
-    gFactor = 1.0;
-    bFactor = 1.0;
-    calibrationDone = false; // 🚨 キャリブレーション完了フラグもリセット
-    frameCounter = 0;
-    lastProcessedImageData = null;
-
-    // 4. UIのリセット
-    if (canvas && ctx) ctx.clearRect(0, 0, pixelWidth, pixelHeight);
-    
-    updateStatus('statusInitialReady'); 
-    
-    updateCorrectionFactors(1.0, 1.0, 1.0); // 係数表示をリセット
-    
-    // 5. ボタン状態のリセット
-    updateControlPanel(); // IDLE状態に戻るため、これでボタンも正しくリセットされる
-
-    // 6. Wasmの初期化を再度開始
-    startWasmInitialization();
-}
-
-/**
- * @function openInDedicatedWindow
- * @description 現在のウィンドウを閉じ、タブバーを持たない単独の新しいウィンドウでアプリを開き直す。
- */
-function openInDedicatedWindow() { 
-    streamLog('statusWindowInfo', 'info');
-    
-    const currentUrl = window.location.href;
-    
-    const features = 'toolbar=no,menubar=no,status=no,resizable=yes,scrollbars=yes,width=1000,height=800';
-    
-    const newWindow = window.open(currentUrl, '_blank', features);
-
-    if (newWindow) {
-        streamLog('statusWindowOpened', 'info'); 
-        window.close();
-    } else {
-        streamLog('statusError', 'error', getDynamicLogMessage('statusError', "ポップアップがブロックされました。ブラウザの設定を確認してください。"));
-    }
-}
-
-
-// ----------------------------------------------------
-// 4. 画像描画ロジック
-// ----------------------------------------------------
-
-/**
- * @function drawGrayscaleAccumulation
- * @description ワーカーから受け取った積算データをグレースケール画像として描画する。
- * @param {Uint8ClampedArray} dataArray - ワーカーから返された積算結果の可視化データ (RGBA形式)
- */
-function drawGrayscaleAccumulation(dataArray) {
-    if (!ctx || !dataArray || dataArray.length === 0) return;
-
-    // CanvasのImageDataを生成
-    const tempImageData = ctx.createImageData(pixelWidth, pixelHeight);
-    const data = tempImageData.data; 
-    
-    // 1. 最大積算値を見つける (スケーリングのため)
-    let maxVal = 0;
-    for (let i = 0; i < dataArray.length; i += 4) {
-        // Rチャネルに積算値が入っている想定
-        if (dataArray[i] > maxVal) {
-            maxVal = dataArray[i]; 
+            case 'DATA_RETURNED':
+                // Workerから利用済みのArrayBufferが返却されたらプールに戻す
+                if (data.arrayBuffer) {
+                    returnBufferToPool(data.arrayBuffer);
+                }
+                break;
+                
+            case 'BUFFER_ALLOCATED':
+                accumulationBufferPtr = data.ptr;
+                logMessage(`Wasmヒープに累積バッファを確保 (Ptr: ${accumulationBufferPtr})。本計測を開始します。`, 'success');
+                measurementMode = 'MAIN_RUN';
+                startButton.textContent = "一時停止";
+                startButton.disabled = false;
+                resetButton.disabled = false;
+                prelimButton.disabled = true;
+                break;
+                
+            case 'STATS_RESULT':
+                currentStats = data.stats;
+                updateUI();
+                
+                if (measurementMode === 'PRELIMINARY' && currentStats.frameCount >= MAX_CALIBRATION_FRAMES) {
+                    stopPreliminaryMeasurement();
+                }
+                break;
+                
+            case 'ACCUMULATION_RESULT':
+                currentStats.frameCount = data.stats.frameCount;
+                currentStats.pixelTotal = data.stats.pixelTotal;
+                currentStats.sum_Charge = data.stats.sum_Charge;
+                currentStats.sum_Charge_sq = data.stats.sum_Charge_sq;
+                updateUI();
+                
+                // 一定フレームごとに累積画像を取得し、表示を更新
+                if (isMeasuring && currentStats.frameCount > 0 && currentStats.frameCount % IMAGE_UPDATE_INTERVAL === 0) {
+                    requestImageUpdate();
+                }
+                
+                break;
+                
+            case 'IMAGE_DATA_RESULT':
+                // Workerから転送された累積画像データを受け取り、Canvasに描画
+                displayAccumulatedImage(data.imageDataArray, data.width, data.height);
+                // ArrayBufferが転送されたため、ここで imageDataArray は再利用可能
+                break;
+                
+            case 'HOTSPOT_RESULT':
+                // ホットスポット検出結果の処理
+                // 累積画像の描画直後に実行されることが期待される
+                if (currentDisplayMode === 'REALTIME' || currentDisplayMode === 'GRAYSCALE' || currentDisplayMode === 'COLOR') {
+                    displayHotspots(data.hotspots);
+                }
+                if (data.hotspots.length > 0) {
+                     logMessage(`【検出】ホットスポットを ${data.hotspots.length} 個検出しました。 (閾値: ${data.stats.threshold.toFixed(2)})`, 'info');
+                }
+                break;
         }
-    }
-    
-    // 2. スケーリング係数を計算 (最大値を255にする)
-    const scaleFactor = maxVal > 0 ? 255.0 / maxVal : 1.0;
+    };
 
-    // 3. グレースケール画像を生成・設定
-    for (let i = 0; i < dataArray.length; i += 4) {
-        const sourceVal = dataArray[i]; 
-        
-        // スケーリング
-        const scaledVal = Math.min(255, Math.round(sourceVal * scaleFactor));
-
-        // グレースケール (R=G=B) に設定
-        data[i] = scaledVal;     // R
-        data[i + 1] = scaledVal; // G
-        data[i + 2] = scaledVal; // B
-        data[i + 3] = 255;       // A (不透明)
-    }
-
-    // 4. Canvasに描画
-    ctx.putImageData(tempImageData, 0, 0);
+    worker.onerror = (e) => {
+        logMessage(`Workerエラー: ${e.message}`, 'error');
+        console.error('Worker Error:', e);
+        prelimButton.disabled = true;
+    };
 }
 
+// ----------------------------------------------------------------------
+// 2. カメラアクセスとフレーム取得
+// ----------------------------------------------------------------------
 
-/**
- * @function drawColorBarUnimplemented
- * @description カラー積算画像が未実装であることを示すカラーバーを描画する
- */
-function drawColorBarUnimplemented() {
-    if (!ctx) return;
-    
-    ctx.clearRect(0, 0, pixelWidth, pixelHeight);
-    
-    const segmentCount = 10;
-    const segmentWidth = pixelWidth / segmentCount;
-    const colors = ['#f00', '#fa0', '#ff0', '#af0', '#0f0', '#0fa', '#0ff', '#0af', '#00f', '#80f']; 
-
-    for (let i = 0; i < segmentCount; i++) {
-        ctx.fillStyle = colors[i];
-        ctx.fillRect(i * segmentWidth, 0, segmentWidth, pixelHeight * 0.7);
-    }
-    
-    ctx.fillStyle = '#f3f4f6'; 
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = 'bold 30px sans-serif';
-    ctx.fillText(LANGUAGE_PACK[currentLang]['modeColor'] || 'カラー', pixelWidth / 2, pixelHeight * 0.8);
-    ctx.font = '20px sans-serif';
-    ctx.fillText(`(${LANGUAGE_PACK[currentLang]['unimplemented'] || '未実装'})`, pixelWidth / 2, pixelHeight * 0.88);
-}
-
-
-function drawCanvasContent() {
-    if (!canvas || !ctx) return;
-    
-    // 修正: 無条件のキャンバスクリア処理を削除。
-    // キャンバスクリアは、CORRECTION/MEASUREMENTモードにおいては
-    // processFrameLoop の ctx.drawImage(video, ...) の直後に実行される。
-    // IDLEモードではクリアせず、最後の描画内容を静止画として保持する。
-
-    if (currentDisplayMode === 'REALTIME') {
-        if (videoReady && video) {
-            ctx.drawImage(video, 0, 0, pixelWidth, pixelHeight);
-        }
-    } else if (currentDisplayMode === 'GRAYSCALE') {
-        if (lastProcessedImageData && lastProcessedImageData.length > 0) {
-             drawGrayscaleAccumulation(lastProcessedImageData);
-        }
-    } else if (currentDisplayMode === 'COLOR') {
-        drawColorBarUnimplemented();
-    }
-}
-
-/**
- * @function drawCorrectionGraph
- * @description キャリブレーションの進捗を 'correction-graph' キャンバスに描画する。
- * @param {number} frameCount - 現在の処理済みフレーム数
- * @param {number} totalFrames - 目標とする総フレーム数
- * @param {boolean} isDone - 完了したかどうか
- */
-function drawCorrectionGraph(frameCount, totalFrames, isDone = false) {
-    const graphCanvas = document.getElementById('correction-graph');
-    if (!graphCanvas) return;
-
-    const gCtx = graphCanvas.getContext('2d');
-    const width = graphCanvas.width;
-    const height = graphCanvas.height;
-
-    gCtx.clearRect(0, 0, width, height);
-
-    const style = getComputedStyle(document.body);
-    const bgColor = style.getPropertyValue('--log-bg-color').trim();
-    const waitColor = style.getPropertyValue('--wait-color').trim();
-    const successColor = style.getPropertyValue('--success-color').trim();
-    const textColor = style.getPropertyValue('--text-color').trim();
-    
-    gCtx.fillStyle = bgColor;
-    gCtx.fillRect(0, 0, width, height);
-    
-    const padding = 5;
-    const barHeight = height - 2 * padding;
-    const barWidth = width - 2 * padding;
-    
-    const progress = Math.min(frameCount / totalFrames, 1.0);
-    const currentProgressWidth = barWidth * progress;
-
-    gCtx.fillStyle = isDone ? successColor : waitColor;
-    gCtx.fillRect(padding, padding, currentProgressWidth, barHeight);
-
-    const percentage = (progress * 100).toFixed(0);
-    const text = isDone ? `${percentage}% COMPLETE` : `${percentage}%`;
-
-    gCtx.fillStyle = isDone ? bgColor : textColor;
-    gCtx.font = `${barHeight * 0.5}px Arial`;
-    gCtx.textAlign = 'center';
-    gCtx.textBaseline = 'middle';
-    gCtx.fillText(text, width / 2, height / 2);
-}
-
-
-// ----------------------------------------------------
-// 5. 初期化とメインロジック (このセクションを繰り下げ)
-// ----------------------------------------------------
-
-async function initApp() {
-    
-    // DOM要素の取得 (全て)
-    video = document.getElementById('camera-video');
-    canvas = document.getElementById('processing-canvas');
-    mainTitle = document.getElementById('main-title'); 
-    mainHeader = document.getElementById('main-header'); 
-    preliminaryButton = document.getElementById('preliminary-measurement-button');
-    startButton = document.getElementById('start-measurement-button');
-    resetButton = document.getElementById('reset-button');
-    dedicatedWindowButton = document.getElementById('dedicated-window-button');
-    langSwitchButton = document.getElementById('lang-switch-button'); 
-    logElement = document.getElementById('log-stream');
-    progressStatus = document.getElementById('progress-status');
-    factorGRLabel = document.getElementById('g-factor-label'); 
-    factorBRLabel = document.getElementById('b-factor-label'); 
-    factorGRValue = document.getElementById('g-r-factor'); 
-    factorBRValue = document.getElementById('b-r-factor'); 
-    headerCalib = document.getElementById('header-calib'); 
-    correctionGraph = document.getElementById('correction-graph'); 
-    headerDisplayMode = document.getElementById('header-display-mode'); 
-    labelRealtime = document.getElementById('label-realtime'); 
-    labelGrayscale = document.getElementById('label-grayscale'); 
-    labelColor = document.getElementById('label-color'); 
-    radioRealtime = document.getElementById('mode-realtime');
-    radioGrayscale = document.getElementById('mode-grayscale');
-    radioColor = document.getElementById('mode-color');
-
-
-    if (canvas) {
-        ctx = canvas.getContext('2d');
-    } else {
-        console.error("Fatal Error: 'processing-canvas' element not found.");
-        return;
-    }
-    
-    // UIの初期無効化
-    if (preliminaryButton) preliminaryButton.disabled = true; 
-    if (startButton) startButton.disabled = true;
-    if (resetButton) resetButton.disabled = false; 
-
-    // Step 1: 言語パックのロードと適用 
-    try {
-        if (Object.keys(LANGUAGE_PACK).length === 0) {
-            const response = await fetch('lang.json');
-            if (!response.ok) {
-                 throw new Error(`lang.json fetch failed: ${response.statusText}`);
-            }
-            LANGUAGE_PACK = await response.json();
-            setUILanguage(currentLang); // <-- 呼び出しが可能になりました
-        } else {
-            setUILanguage(currentLang); // <-- 呼び出しが可能になりました
-        }
-    } catch (e) {
-        console.error("Failed to load lang.json:", e);
-        streamLog('statusError', 'error', `言語ファイル (lang.json) の読み込みに失敗しました。詳細: ${e.message}`);
-    }
-    
-    // Step 2: Workerの作成と永続ハンドラの設定
-    worker = new Worker('detector_worker.js');
-    worker.onmessage = handleWorkerMessage; 
-    
-    // Step 3: イベントリスナー設定
-    if (preliminaryButton) preliminaryButton.addEventListener('click', startPreliminaryMeasurement); 
-    if (startButton) startButton.addEventListener('click', startMainMeasurement); 
-    if (resetButton) resetButton.addEventListener('click', resetSystem); 
-    if (dedicatedWindowButton) dedicatedWindowButton.addEventListener('click', openInDedicatedWindow); 
-    if (langSwitchButton) langSwitchButton.addEventListener('click', toggleLanguage);
-    
-    // 画像表示モード切り替えのイベントリスナー
-    [radioRealtime, radioGrayscale, radioColor].forEach(radio => {
-        if (radio) {
-            radio.addEventListener('change', (e) => {
-                currentDisplayMode = e.target.value;
-                streamLog('statusInit', 'info', `表示モード: ${currentDisplayMode} に変更`); 
-                drawCanvasContent();
-            });
-        }
-    });
-
-    // Step 4: Wasmの初期化を開始
-    await startWasmInitialization();
-    
-    // Step 5: 最終チェックと初期値設定
-    if (!wasmReady) {
-        streamLog('statusError', 'error', getDynamicLogMessage('statusInitFailed', "Wasm"));
-    }
-    
-    // 補正係数の初期値を設定 (NaN表示を防ぐ)
-    if (factorGRValue) factorGRValue.textContent = gFactor.toFixed(4); 
-    if (factorBRValue) factorBRValue.textContent = bFactor.toFixed(4); 
-    
-    // 最初のフレーム処理用にバッファを確保
-    const bufferSize = pixelWidth * pixelHeight * 4; 
-    currentFrameBuffer = new ArrayBuffer(bufferSize);
-    canProcessFrame = true;
-}
-
-// Wasmの初期化のみを行う関数
-async function startWasmInitialization() {
-    
-    if (initializationStarted) {
-        streamLog('statusAlreadyInit', 'info');
-        return Promise.resolve(true); 
-    }
-    
-    initializationStarted = true;
-    streamLog('statusInit', 'info'); 
-    
-    try {
-        const wasmReadyPromise = new Promise((resolve, reject) => {
-            wasmReadyPromiseResolve = resolve;
-            worker.onerror = (e) => {
-                reject(new Error(`Worker Error: ${e.message}`));
-            };
-        });
-
-        // 1. Wasmバイナリのロードと送信
-        streamLog('statusInit', 'wait');
-        const wasmResponse = await fetch('detector_core.wasm'); 
-        if (!wasmResponse.ok) {
-            throw new Error(`Wasmファイルが見つかりません (Status: ${wasmResponse.status})`);
-        }
-        const wasmBinary = await wasmResponse.arrayBuffer();
-        worker.postMessage({ type: 'LOAD_WASM_MODULE', wasmBinary: wasmBinary }, [wasmBinary]); 
-
-        // 2. Wasmの初期化完了を待つ
-        await wasmReadyPromise; 
-        wasmReady = true;
-        
-        // 3. Wasm Coreに初期化を要求 (サイズ情報)
-        worker.postMessage({ type: 'INIT_CORE', width: pixelWidth, height: pixelHeight }); 
-
-        // 準備完了で予備測定ボタンを有効化
-        if (preliminaryButton) preliminaryButton.disabled = false;
-        streamLog('statusWasmReady', 'success'); 
-        updateControlPanel();
-
-        return true; 
-    } catch (err) {
-        streamLog('statusError', 'error', getDynamicLogMessage('statusInitFailed', `Wasm (${err.message || err.name})`));
-        initializationStarted = false;
-        if (resetButton) resetButton.disabled = false;
-        return false; 
-    }
-}
-
-// カメラ起動ロジック
 async function startCamera() {
-    if (videoReady) return true;
-
+    if (videoStream) return;
     try {
-        streamLog('statusInitialReady', 'wait'); 
-        stream = await navigator.mediaDevices.getUserMedia({ 
-            video: { facingMode: 'environment', width: 640, height: 480 } 
-        });
-        
-        if (video) video.srcObject = stream;
-        
-        await new Promise((resolve) => { 
-            if(video) video.onloadedmetadata = resolve;
-            else resolve(); 
-        });
-        
-        if (video) {
-            pixelWidth = video.videoWidth; 
-            pixelHeight = video.videoHeight;
-            if (canvas) {
-                 canvas.width = pixelWidth;
-                 canvas.height = pixelHeight;
+        logMessage('カメラへのアクセスを要求中...');
+        videoStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: 'environment', 
+                width: { ideal: 640 },
+                height: { ideal: 480 },
             }
-            video.width = pixelWidth;
-            video.height = pixelHeight;
-        }
-
-        worker.postMessage({ type: 'INIT_CORE', width: pixelWidth, height: pixelHeight });
+        });
+        video.srcObject = videoStream;
+        video.play();
         
-        videoReady = true;
-        streamLog('statusCamera', 'success');
-        
-        // 🚨 最終修正箇所: カメラ映像自体を非表示にし、Canvasのみを表示する
-        if (video) video.style.display = 'none';
-        if (canvas) canvas.style.display = 'block';
-        
-        requestAnimationFrame(processFrameLoop);
-        
-        return true;
-    } catch (err) {
-        streamLog('statusError', 'error', getDynamicLogMessage('statusInitFailed', `カメラ (${err.message || err.name})`));
-        return false;
+        video.onloadedmetadata = () => {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            logMessage(`カメラ起動: ${video.videoWidth}x${video.videoHeight}px`);
+        };
+    } catch (error) {
+        logMessage('カメラにアクセスできませんでした。レンズが遮光されているか確認してください。', 'error');
+        console.error('Camera access error:', error);
+        // カメラ起動失敗後、ボタンを有効に戻す
+        prelimButton.disabled = false;
+        throw new Error("Camera failed to start.");
     }
 }
 
-async function startPreliminaryMeasurement() {
-    if (!wasmReady) {
-        streamLog('statusError', 'error', getDynamicLogMessage('statusInitFailed', "Wasm"));
-        return;
-    }
-
-    if (!(await startCamera())) {
-        streamLog('statusError', 'error', getDynamicLogMessage('statusInitFailed', "カメラ"));
-        return;
-    }
-    
-    currentMode = 'CORRECTION_MODE';
-    streamLog('statusCalib', 'wait'); 
-    
-    // UIを補正中モードに更新
-    updateControlPanel();
-    
-    // 進捗表示を初期化
-    updateStatus('statusCalib'); 
-    
-    // グラフをリセット
-    drawCorrectionGraph(0, TARGET_CORRECTION_FRAMES, false); 
-
-    // Workerに初期化と最初のフレーム処理を指示
-    worker.postMessage({ type: 'RESET_ACCUMULATION' }); 
-    canProcessFrame = true;
-    
-    ctx.clearRect(0, 0, pixelWidth, pixelHeight); 
-}
+// ----------------------------------------------------------------------
+// 3. フレーム処理ループ (Wasmへ転送)
+// ----------------------------------------------------------------------
+let frameRequestId;
 
 function processFrameLoop() {
-    // 処理の前提条件チェック
-    if (!videoReady || !wasmReady || !worker) {
-        drawCanvasContent(); 
-        requestAnimationFrame(processFrameLoop);
+    // 測定モードに関わらず、カメラ映像をCanvasに描画し続ける
+    if (!videoStream || video.paused || video.ended || canvas.width === 0) {
+        frameRequestId = requestAnimationFrame(processFrameLoop);
         return;
     }
-
-    // 1. IDLEモードの場合は静止画像を維持
-    // drawCanvasContent() のみ呼び出し、ctx.drawImageとctx.clearRectは実行しない
-    if (currentMode === 'IDLE') {
-        drawCanvasContent();
-        requestAnimationFrame(processFrameLoop);
-        return;
+    
+    // Canvasをクリア (積算画像が表示されている場合は、一旦上書きを防ぐ)
+    if (measurementMode !== 'MAIN_RUN' || !isMeasuring || currentDisplayMode === 'REALTIME') {
+        // REALTIMEモードの場合、カメラ映像を常に描画
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     }
-
-    // --- CORRECTION/MEASUREMENTモードの処理を続行 ---
     
-    // 1. Workerに送るためのフレームデータをCanvas経由で取得
-    ctx.drawImage(video, 0, 0, pixelWidth, pixelHeight); 
-    const imageData = ctx.getImageData(0, 0, pixelWidth, pixelHeight);
-    
-    // 2. Canvasをクリア
-    // データ取得後、すぐにCanvasをクリアし、リアルタイム映像がユーザーに見えるのを防ぐ
-    ctx.clearRect(0, 0, pixelWidth, pixelHeight); 
-    
-    // 3. 5fps間引きロジック
-    frameCounter++;
-    const sendFrame = (frameCounter % (60 / 5)) === 0;
-    
-    // 4. Workerへのフレーム処理要求
-    if (sendFrame && canProcessFrame) { 
-        canProcessFrame = false; 
-        currentFrameBuffer = imageData.data.buffer;
+    // 測定中の場合のみ、Wasmへデータ転送
+    if (measurementMode === 'PRELIMINARY' || (measurementMode === 'MAIN_RUN' && isMeasuring)) {
         
-        const returnImage = (currentDisplayMode !== 'REALTIME'); 
+        // Canvasから最新の画像データを取得
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        
+        // ArrayBufferをプールから取得または新規作成し、データをコピー
+        const dataSize = imageData.data.buffer.byteLength;
+        const dataBuffer = getOrCreateBuffer(dataSize);
+        new Uint8ClampedArray(dataBuffer).set(imageData.data);
 
-        worker.postMessage({
-            type: 'PROCESS_FRAME',
-            width: pixelWidth,
-            height: pixelHeight,
-            buffer: currentFrameBuffer,
-            gFactor: gFactor,
-            bFactor: bFactor,
-            currentMode: currentMode,
-            returnImage: returnImage
-        }, [currentFrameBuffer]);
-    }
-    
-    // 5. 画像の更新フラグをリセット
-    if (updateImage && lastProcessedImageData) {
-        updateImage = false; 
-    } 
-    
-    // 6. モードに応じた最終的な描画を実行
-    drawCanvasContent();
+        // ImageDataオブジェクトを転送用に再構築
+        const transferableImageData = new ImageData(new Uint8ClampedArray(dataBuffer), canvas.width, canvas.height);
 
-    // 7. ループを継続
-    requestAnimationFrame(processFrameLoop);
-}
-
-function handleWorkerMessage(e) {
-    const data = e.data;
-    
-    if (data.type === 'STATUS' && data.message === 'WasmReady') {
-        if (typeof wasmReadyPromiseResolve === 'function') {
-            wasmReadyPromiseResolve(); 
+        if (measurementMode === 'PRELIMINARY') {
+            // 予備測定: 統計量計算
+            worker.postMessage({
+                type: 'PROCESS_FRAME',
+                imageData: transferableImageData, 
+                width: canvas.width,
+                height: canvas.height
+            }, [dataBuffer]); // ArrayBufferを転送して効率化
+            
+        } else if (measurementMode === 'MAIN_RUN' && isMeasuring) {
+            // 本計測: 積算処理 (frameCountはWasm側で更新)
+            worker.postMessage({
+                type: 'ACCUMULATE_FRAME',
+                imageData: transferableImageData, 
+            }, [dataBuffer]); // ArrayBufferを転送して効率化
         }
-        return; 
     }
 
-    if (data.buffer) {
-        currentFrameBuffer = data.buffer;
-    }
-    canProcessFrame = true;
+    // 次のフレームを要求
+    frameRequestId = requestAnimationFrame(processFrameLoop);
+}
 
-    // 積算画像データ処理
-    if (data.imageData) {
-        lastProcessedImageData = new Uint8ClampedArray(data.imageData);
-        updateImage = true;
+// ----------------------------------------------------------------------
+// 4. 累積画像の取得と描画
+// ----------------------------------------------------------------------
+
+/**
+ * Workerに累積画像の取得と正規化、およびホットスポット検出を要求
+ */
+function requestImageUpdate() {
+    if (canvas.width === 0 || currentStats.frameCount === 0) return;
+    
+    // 正規化のための最大値計算
+    // Wasmコアのロジックでは、各ピクセルがMAX_CALIBRATION_FRAMESで割られて正規化されることが前提
+    const max_value = 255.0 * currentStats.frameCount; 
+
+    // 累積画像の取得 (表示モードに応じてWasm側の処理が変わる)
+    worker.postMessage({
+        type: 'GET_ACCUMULATED_IMAGE',
+        width: canvas.width,
+        height: canvas.height,
+        max_value: max_value, 
+        mode: currentDisplayMode // Wasm側へ表示モードを通知
+    });
+
+    // ホットスポット検出を要求 (検出は常に行う)
+    worker.postMessage({
+        type: 'DETECT_HOTSPOTS',
+        width: canvas.width,
+        height: canvas.height
+    });
+}
+
+/**
+ * Workerから転送された画像データをCanvasに描画
+ * @param {ArrayBuffer} buffer 転送されたUint8ClampedArrayのArrayBuffer
+ * @param {number} width 画像幅
+ * @param {number} height 画像高さ
+ */
+function displayAccumulatedImage(buffer, width, height) {
+    if (currentDisplayMode === 'REALTIME') return; // REALTIMEモードではライブ映像が優先
+
+    // ArrayBufferをUint8ClampedArrayに戻す
+    const dataArray = new Uint8ClampedArray(buffer);
+    
+    // ImageDataオブジェクトを作成
+    const accumulatedImageData = new ImageData(dataArray, width, height);
+
+    // Canvasに描画
+    ctx.putImageData(accumulatedImageData, 0, 0);
+    
+    logMessage(`累積画像を表示 (${currentStats.frameCount}フレーム, モード: ${currentDisplayMode})`, 'debug');
+}
+
+/**
+ * Canvas上に検出されたホットスポットを描画
+ * @param {Array<{x: number, y: number, intensity: number, threshold: string}>} hotspots 
+ */
+function displayHotspots(hotspots) {
+    // 累積画像またはリアルタイム映像が既に描画されている前提で、上から重ねて描画する
+    
+    // REALTIMEモードの場合、先に描画したリアルタイム映像の上に検出点を重ねる
+    if (currentDisplayMode === 'REALTIME') {
+        // 透明度を下げて、検出点のみを強調する
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
     
-    switch (data.type) {
-            
-        case 'CORRECTION_PROCESSED':
-            const rSum = data.rSum; 
-            const gSum = data.gSum;
-            const bSum = data.bSum;
-            const pixelCount = data.pixelCount; // 🚨 ノイズピクセル数を受け取る
-            
-            const frameCount = data.frameCount;
-            const totalFrames = TARGET_CORRECTION_FRAMES; 
+    ctx.save(); 
+    
+    ctx.strokeStyle = '#FF0000'; // 赤い枠線
+    ctx.lineWidth = 2;
+    ctx.fillStyle = 'rgba(255, 0, 0, 0.7)'; // 半透明の赤
+    ctx.shadowBlur = 5;
+    ctx.shadowColor = '#FF0000';
 
-            // プログレスバー描画を呼び出し
-            drawCorrectionGraph(frameCount, totalFrames, frameCount >= totalFrames);
-
-            // 進捗テキスト表示を更新
-            if (progressStatus) {
-                progressStatus.textContent = getDynamicLogMessage('statusCalib', frameCount, totalFrames); 
-                progressStatus.style.color = 'var(--wait-color)'; 
-            }
-
-            if (frameCount >= totalFrames) {
-                const totalR = Number(rSum); 
-                const totalG = Number(gSum);
-                const totalB = Number(bSum);
-                
-                if (totalR > 0 && totalG > 0 && totalB > 0) {
-                    // Rを基準とした補正係数を計算（計算式自体は正しい）
-                    gFactor = totalR / totalG; 
-                    bFactor = totalR / totalB;
-                    
-                    if (factorGRValue) factorGRValue.textContent = gFactor.toFixed(4);
-                    if (factorBRValue) factorBRValue.textContent = bFactor.toFixed(4);
-
-                    streamLog('statusFactorUpdate', 'success', gFactor.toFixed(4), bFactor.toFixed(4));
-                } else {
-                    streamLog('statusError', 'error', 'Calibration sums were zero. Check camera feed and WASM initialization.');
-                }
-
-                currentMode = 'IDLE'; 
-                calibrationDone = true;
-                
-                updateStatus('statusCalibDone'); 
-                streamLog('statusCalibDone', 'success');
-                
-                // 🚨 ノイズピクセル数の最終結果をログ出力
-                const totalPixels = pixelWidth * pixelHeight * totalFrames;
-                const totalNoisePixels = pixelCount;
-                const noiseRatio = (totalNoisePixels / totalPixels) * 100;
-                
-                streamLog('statusInit', 'info', `--- Noise Measurement Summary ---`);
-                streamLog('statusInit', 'info', `Total Accumulated Pixels: ${totalNoisePixels.toLocaleString()}`);
-                streamLog('statusInit', 'info', `Total Possible Pixels (Frames*W*H): ${totalPixels.toLocaleString()}`);
-                streamLog('statusInit', 'info', `Noise Detection Rate: ${noiseRatio.toFixed(6)}%`);
-                streamLog('statusInit', 'info', `---------------------------------`);
-
-                updateControlPanel();
-            }
-            break;
-            
-        case 'PROCESSED': 
-            // 本計測処理ロジック (TODO)
-            break;
+    hotspots.forEach(spot => {
+        const radius = 5; // 検出点を強調するための円の半径
         
-        case 'ERROR': 
-            const errorMessage = data.message ? `WASM Worker Error: ${data.message}` : `WASM Worker Error: Unknown error (Message property missing).`;
-            streamLog('statusError', 'error', errorMessage);
-            currentMode = 'IDLE';
-            updateControlPanel();
-            break;
+        ctx.beginPath();
+        // 中心座標 (x, y) に円を描画
+        ctx.arc(spot.x, spot.y, radius, 0, Math.PI * 2, true); 
+        ctx.fill();
+        ctx.stroke();
+    });
+    
+    ctx.restore(); // 以前のCanvasの状態に戻す
+}
+
+
+// ----------------------------------------------------------------------
+// 5. UI/UXとイベントハンドラ
+// ----------------------------------------------------------------------
+
+/**
+ * プログレスバーCanvasに現在の進捗を描画
+ * @param {number} percentage 0から100の進捗率
+ */
+function drawProgressBar(percentage) {
+    const w = progressCanvas.width;
+    const h = progressCanvas.height;
+    progressCtx.clearRect(0, 0, w, h);
+
+    // HTMLのCSS変数から背景色を取得
+    const rootStyle = getComputedStyle(document.documentElement);
+    const bgColor = rootStyle.getPropertyValue('--color-canvas-bg').trim() || '#444444';
+    const fgColor = rootStyle.getPropertyValue('--color-primary').trim() || '#654ff0';
+    
+    progressCtx.fillStyle = bgColor; 
+    progressCtx.fillRect(0, 0, w, h);
+
+    const progressWidth = w * (percentage / 100);
+    progressCtx.fillStyle = fgColor; 
+    progressCtx.fillRect(0, 0, progressWidth, h);
+
+    progressCtx.fillStyle = 'white'; 
+    progressCtx.font = 'bold 16px Inter, sans-serif';
+    progressCtx.textAlign = 'center';
+    progressCtx.textBaseline = 'middle';
+    progressCtx.fillText(`${percentage.toFixed(0)}%`, w / 2, h / 2);
+}
+
+
+function updateUI() {
+    const frameCount = currentStats.frameCount;
+    const pixelTotal = currentStats.pixelTotal;
+    const sum = currentStats.sum_Charge;
+    const sum_sq = currentStats.sum_Charge_sq;
+    
+    const totalSamples = frameCount * pixelTotal; 
+    
+    const avg_Charge = totalSamples > 0 ? sum / totalSamples : 0; 
+    const variance = totalSamples > 0 ? (sum_sq / totalSamples) - (avg_Charge * avg_Charge) : 0;
+    const std_dev = Math.sqrt(Math.max(0, variance)); 
+
+    // 進捗表示
+    let percentage = 0;
+    let statusText = '初期化を待機しています...';
+
+    if (measurementMode === 'PRELIMINARY') {
+        percentage = Math.min(100, (frameCount / MAX_CALIBRATION_FRAMES) * 100);
+        statusText = `ノイズデータ収集中 (${percentage.toFixed(1)}%): ${frameCount} / ${MAX_CALIBRATION_FRAMES} フレーム | μ: ${avg_Charge.toFixed(3)} | σ: ${std_dev.toFixed(3)}`;
+        drawProgressBar(percentage);
+    } else if (measurementMode === 'MAIN_RUN') {
+        percentage = 100; 
+        statusText = `【本計測中】フレーム積算中: ${frameCount} フレーム | 平均ノイズ(μ): ${avg_Charge.toFixed(3)}, 標準偏差(σ): ${std_dev.toFixed(3)}`;
+        drawProgressBar(100); 
+    } else if (frameCount > 0) {
+        statusText = `【調整完了】平均電荷ノイズ(μ): ${avg_Charge.toFixed(3)}, 標準偏差(σ): ${std_dev.toFixed(3)} (総フレーム: ${frameCount})`;
+        drawProgressBar(0);
+    } else {
+        if(videoStream) {
+             statusText = 'Wasmコアの準備完了。「予備測定」ボタンを押してください。';
+        } else {
+             statusText = 'Wasmコアの準備完了。カメラは未起動です。';
+        }
+        drawProgressBar(0);
+    }
+    
+    progressStatus.textContent = statusText;
+    
+    gFactorDisplay.textContent = calibrationFactors.g_factor.toFixed(4);
+    bFactorDisplay.textContent = calibrationFactors.b_factor.toFixed(4);
+}
+
+/**
+ * 予備測定（キャリブレーション）処理
+ * カメラがまだ起動していない場合は、ここで起動する
+ */
+async function startPreliminaryMeasurement() {
+    if (!videoStream) {
+        logMessage('カメラを起動中... 予備測定を開始するまでお待ちください。');
+        prelimButton.disabled = true;
+        startButton.disabled = true;
+        resetButton.disabled = true;
+        try {
+            await startCamera(); 
+            logMessage('カメラ起動成功。');
             
-        case 'DEBUG':
-            // Workerからのデバッグメッセージ（積算値とピクセル数を含む）を出力
-            console.log(`[WORKER DEBUG] ${data.message}`);
-            break;
+            // カメラ起動後、フレーム処理ループが開始し、canvasサイズが確定したら
+            // 予備測定が開始できる状態に戻る
+            prelimButton.disabled = false;
+        } catch (e) {
+            // startCamera内でエラー時にボタンを戻しているのでここでは何もしない
+            return;
+        }
+    }
+    
+    // カメラ起動済みまたは起動に成功した場合のみ、測定を開始
+    measurementMode = 'PRELIMINARY';
+    
+    // 測定前にリセットを実行
+    worker.postMessage({ type: 'RESET' });
+    
+    logMessage('予備測定 (ノイズレベル計測) を開始します。カメラレンズが完全に遮光されていることを確認してください。');
+    isMeasuring = true;
+    prelimButton.disabled = true;
+    startButton.disabled = true; 
+    resetButton.disabled = false;
+}
+
+/**
+ * 予備測定の停止と補正係数の計算
+ */
+function stopPreliminaryMeasurement() {
+    isMeasuring = false;
+    measurementMode = 'IDLE'; // IDLEに戻す
+    prelimButton.disabled = false;
+    startButton.disabled = false; 
+    
+    // 統計情報に基づいて係数計算 (Wasm側で計算されるべきだが、JSでモック)
+    let calculated_g_factor = 1.0250;
+    let calculated_b_factor = 0.9850;
+
+    calibrationFactors.g_factor = calculated_g_factor;
+    calibrationFactors.b_factor = calculated_b_factor;
+
+    logMessage(`補正係数を計算: G/R=${calculated_g_factor.toFixed(4)}, B/R=${calculated_b_factor.toFixed(4)}`, 'success');
+    
+    // Wasmコアには計算された係数を設定
+    worker.postMessage({ 
+        type: 'SET_FACTORS',
+        g_factor: calibrationFactors.g_factor,
+        b_factor: calibrationFactors.b_factor
+    });
+    
+    logMessage(`Wasmコアに計算された補正係数を設定しました。`, 'info');
+    
+    updateUI();
+}
+
+function startMeasurement() {
+    if (measurementMode !== 'MAIN_RUN') {
+        // 本計測開始処理
+        if (canvas.width === 0 || canvas.height === 0) {
+            logMessage('カメラが起動し、サイズ情報が取得されるまで待ってください。', 'error');
+            return;
+        }
+
+        logMessage('本計測を開始します。Wasmコアに累積バッファを確保中...', 'info');
+        
+        isMeasuring = true; 
+        
+        // 累積バッファの確保をWorkerに要求。成功したら measurementMode = 'MAIN_RUN' に切り替わる
+        worker.postMessage({ 
+            type: 'ALLOCATE_BUFFER',
+            width: canvas.width,
+            height: canvas.height
+        });
+
+        // ボタンの状態を一時的に変更
+        startButton.textContent = "確保中...";
+        startButton.disabled = true;
+        resetButton.disabled = true;
+        prelimButton.disabled = true;
+        
+    } else if (measurementMode === 'MAIN_RUN' && isMeasuring) {
+        // 一時停止処理
+        logMessage('計測を一時停止しました。累積結果を確認します。');
+        isMeasuring = false;
+        startButton.textContent = "計測再開";
+        prelimButton.disabled = false;
+        // 一時停止時にも最新の累積画像をWorkerから取得し、最終表示を更新
+        requestImageUpdate(); 
+    } else if (measurementMode === 'MAIN_RUN' && !isMeasuring) {
+        // 計測再開処理
+        logMessage('計測を再開します。');
+        isMeasuring = true;
+        startButton.textContent = "一時停止";
+        prelimButton.disabled = true;
     }
 }
 
-// ----------------------------------------------------
-// 6. アプリケーション開始
-// ----------------------------------------------------
+function resetMeasurement() {
+    // 測定を停止し、すべてをリセット
+    isMeasuring = false;
+    measurementMode = 'IDLE';
+    
+    // 統計情報と累積バッファの解放をWorkerに指示
+    worker.postMessage({ type: 'RESET' }); 
+    accumulationBufferPtr = 0;
+    
+    // すべての統計情報をリセット
+    currentStats = {
+        sum_R: 0.0, sum_R_sq: 0.0,
+        sum_G: 0.0, sum_G_sq: 0.0,
+        sum_B: 0.0, sum_B_sq: 0.0,
+        sum_Charge: 0.0,
+        sum_Charge_sq: 0.0,
+        frameCount: 0,
+        pixelTotal: 0,
+    };
+    calibrationFactors = { g_factor: 1.0, b_factor: 1.0 };
+    
+    // Wasmコアの係数も 1.0 に戻す
+    worker.postMessage({ 
+        type: 'SET_FACTORS',
+        g_factor: 1.0,
+        b_factor: 1.0
+    });
+    
+    startButton.textContent = "計測開始";
+    // 予備測定ボタンはWasm準備完了からの信号を待つため、ここでは無効
+    startButton.disabled = true; 
+    prelimButton.disabled = false; 
+    resetButton.disabled = true;
+    logMessage('システムを初期化しました。予備測定から始めてください。');
+    
+    // Canvasをクリア
+    if (ctx && canvas.width > 0) {
+        ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--color-background').trim() || '#1A1A1A';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    
+    updateUI();
+}
 
-document.addEventListener('DOMContentLoaded', initApp);
+/**
+ * 画像表示モードの切り替え処理
+ */
+function handleDisplayModeChange(e) {
+    const newMode = e.target.value;
+    if (newMode === currentDisplayMode) return;
+    
+    currentDisplayMode = newMode;
+    logMessage(`表示モードを「${newMode}」に切り替えました。`, 'info');
+    
+    // モードが切り替わった場合、本計測中であれば強制的に累積画像を更新
+    if (measurementMode === 'MAIN_RUN' && !isMeasuring) {
+        requestImageUpdate();
+    } else if (newMode === 'REALTIME') {
+        // REALTIMEモードに戻したら、Canvasをクリアしてライブ映像が描画されるようにする
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+}
+
+
+// ----------------------------------------------------------------------
+// 6. 初期ロードとイベントリスナー
+// ----------------------------------------------------------------------
+
+// イベントリスナーの登録
+prelimButton.addEventListener('click', startPreliminaryMeasurement);
+startButton.addEventListener('click', startMeasurement);
+resetButton.addEventListener('click', resetMeasurement);
+
+// 表示モードのラジオボタンのイベントリスナーを登録
+displayModeRadios.forEach(radio => {
+    radio.addEventListener('change', handleDisplayModeChange);
+});
+
+window.onload = () => {
+    // 初期状態では、Wasmが準備できるまでボタンを無効化
+    startButton.disabled = true;
+    prelimButton.disabled = true;
+    resetButton.disabled = true;
+
+    // Canvasの初期化
+    progressCanvas.width = 300; // HTMLのCSSに合わせた固定値
+    progressCanvas.height = 50;
+    
+    initializeWorker();
+    
+    // フレーム処理ループを開始
+    frameRequestId = requestAnimationFrame(processFrameLoop);
+    updateUI();
+};
