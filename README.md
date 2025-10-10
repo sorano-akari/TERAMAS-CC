@@ -28,29 +28,22 @@ Your camera becomes a massive radiation detector that measures the Earth.
 2.  **検出:** 放射線イベントは、真っ暗な画面の上に**チカッと光る点や飛跡**として現れます。
 3.  **高速解析:** **C++**で書かれた検出コアを**WebAssembly (Wasm)**で超高速に動作させ、ノイズと区別し、正確なイベント情報を抽出します。
 
-### 現在のフェーズ 1: バックグラウンドノイズの測定
+### Current Phase 1: Background Noise Measurement & Linearity Correction
 
-プロジェクト開始にあたり、最優先で**正確なノイズレベル**を把握しています。
+プロジェクト開始にあたり、最優先で**正確なノイズレベル**を把握し、**物理量の正確な計測**を可能にします。
 
-* **目的:** 各ピクセルが持つ固有のノイズの**平均値 ($\mu$)** と**標準偏差 ($\sigma$)** を、約5分間（18,000フレーム）のデータから収集・計算します。
+* **課題（Problem）**: 多くのカメラドライバーは、暗闇で**ノイズ抑制**を過剰に行い、真のノイズ信号を消してしまいます。また、RGB出力には**人間の視覚に合わせた非線形な補正（ガンマ補正）**がかかっており、電荷量（物理量）に比例していません。
+* **目的 (Goal)**: **ノイズ抑制を回避**しつつ、$\text{RGB}$ 値を**電荷量に比例する線形な値**に戻すための処理を実装します。
+
+#### ⚛️ 物理量計測のための線形化 (Linearity Correction for Physical Measurement)
+
+電荷量に比例する正確な積算を行うため、以下の**逆ガンマ補正（Inverse Gamma Correction）**を実装します。これは、画像データにかけられた**非線形な補正を排除**し、線形な物理量に戻すための最も重要なステップです。
+
+* **処理**: 各ピクセルの $\text{RGB}$ $8$ビット値 $(0 \sim 255)$ に対して、$\text{sRGB}$ の標準に基づいた**非線形な逆ガンマ関数**を適用します。
+* **効果**: これにより、$\text{RGB}$ 値に隠された非線形な補正が解除され、**光の強さ（電荷量）に比例した線形な値**のみを積算に用いることができるようになります。
+
 * **検出閾値:** $\mu$から**$2\sigma$以上**離れた輝度を、確度の高い「放射線イベント」として判定するための基礎データを作成中です。
 * **C++での実装:** C++ (`detector_core.cpp`) の中で、ピクセルごとの輝度の**総和 ($\Sigma I$)** と**二乗の総和 ($\Sigma I^2$)** を高速に蓄積しています。
-
-## 🔬 Core Technology: How Your Camera Becomes a Detector
-
-A camera's image sensor (CMOS/CCD) generates an electrical charge not only from light but also from high-energy particles (such as **beta rays and muons from cosmic rays**).
-
-1.  **Shading:** Ambient light is completely blocked by covering the lens with black tape or a similar material.
-2.  **Detection:** Radiation events appear as **fleeting bright spots or tracks** against the dark screen.
-3.  **High-Speed Analysis:** The detection core, written in **C++** and run via **WebAssembly (Wasm)**, operates at ultra-high speed to distinguish signals from noise and accurately extract event data.
-
-### Current Phase 1: Background Noise Measurement
-
-Our first priority is accurately characterizing the noise level.
-
-* **Goal:** To calculate the **mean ($\mu$)** and **standard deviation ($\sigma$)** of the intrinsic noise for each pixel, using data collected over approximately 5 minutes (18,000 frames).
-* **Detection Threshold:** This data is used to set the threshold at $\mu + 2\sigma$ to accurately identify high-confidence "radiation events."
-* **C++ Implementation:** The C++ core (`detector_core.cpp`) is currently accumulating the **sum of intensity ($\Sigma I$)** and **sum of squared intensity ($\Sigma I^2$)** for each pixel at high speed.
 
 ---
 
@@ -68,7 +61,8 @@ Our first priority is accurately characterizing the noise level.
 
 | ファイル | 役割 (日本語) | Role (English) |
 | :--- | :--- | :--- |
-| `detector_core.cpp` | 検出アルゴリズム（ノイズ判定、粒子識別など）の開発。 | Core algorithm development (noise identification, particle identification, etc.). |
+| `detector_core.cpp` | **Wasm Core**：検出アルゴリズム（ノイズ判定、**線形化**、粒子識別など）の開発。 | Core algorithm development (noise identification, **linearity correction**, particle identification, etc.). |
+| `detector_worker.js` | **Web Worker**：WebAssemblyの実行とフレーム処理を行うワーカー。 | Web Worker to run WebAssembly and handle frame processing. |
 | `terra-mon.js` | カメラ制御、Wasm連携、UI/UX、データ通信層の開発。 | Development of camera control, Wasm integration, UI/UX, and data communication layers. |
 
 ### 📊 市民科学としての貢献 (データ提供)
@@ -81,4 +75,13 @@ Once the measurement software is released, participation is as simple as coverin
 
 ---
 
-## 📁 リポジトリ構造
+## 📁 リポジトリ構造 (Repository Structure)
+
+| ファイル/ディレクトリ | 役割 (Role) |
+| :--- | :--- |
+| `detector_core.cpp` | **Wasm Core Source**: 検出アルゴリズムと高速計算の C++ ソースコード。 |
+| `detector_core.js` / `.wasm` | **Wasm Artifacts**: C++から生成された WebAssembly のコア実行ファイル。 |
+| `detector_worker.js` | **Web Worker**: $\text{WebAssembly}$ を実行し、フレーム処理をメインスレッドから分離するワーカー。 |
+| `terra-mon.js` | メインスレッドの制御、カメラアクセス、UI/UX管理。 |
+| `index.html` | プロジェクトのフロントエンドエントリポイント。 |
+| `README.md` | プロジェクト概要と技術詳細。 |

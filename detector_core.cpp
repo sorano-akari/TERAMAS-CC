@@ -1,95 +1,219 @@
-#include <stdlib.h> // calloc, free のために必要
+#include <emscripten/emscripten.h>
+#include <cstdlib>   // std::malloc, std::free
+#include <cstring>   // std::memset, std::memcpy
+#include <cstdint>   // uint32_t, uint8_t, uint64_t 
 
-// ----------------------------------------------------
-// グローバル変数（ピクセル統計量を保持する動的配列）
-// ----------------------------------------------------
+// ----------------------------------------------------------------------
+// Wasmリンクの安定化: C互換性とプロトタイプ宣言
+// ----------------------------------------------------------------------
 
-// 輝度の総和 (Sum of Intensity: ΣI)
-long long* sum_intensity = nullptr;
-
-// 輝度の二乗の総和 (Sum of Intensity Squared: ΣI²)
-long long* sum_intensity_sq = nullptr;
-
-// 現在の解像度情報
-int current_width = 0;
-int current_height = 0;
-int frame_counter = 0; // 処理したフレーム数
-
-// ----------------------------------------------------
-// JavaScriptから呼び出される公開関数
-// ----------------------------------------------------
+#ifdef __cplusplus
 extern "C" {
-    /**
-     * @brief 計測の初期化とメモリ確保を行う
-     * * @param width 確定したカメラの幅
-     * @param height 確定したカメラの高さ
-     */
-    void init_bg_measurement(int width, int height) {
-        // 以前確保したメモリがあれば解放し、クリーンな状態にする
-        if (sum_intensity) free(sum_intensity);
-        if (sum_intensity_sq) free(sum_intensity_sq);
-        
-        current_width = width;
-        current_height = height;
-        frame_counter = 0;
-        
-        int pixel_count = width * height;
-        
-        // メモリを動的に確保し、同時にゼロ初期化を行う (callocを使用)
-        // C#の配列初期化と同じく、データはゼロからスタート
-        sum_intensity = (long long*)calloc(pixel_count, sizeof(long long));
-        sum_intensity_sq = (long long*)calloc(pixel_count, sizeof(long long));
-        
-        // メモリ確保に失敗した場合は、JavaScript側でエラーハンドリングが必要
-        if (!sum_intensity || !sum_intensity_sq) {
-            // エラー処理（この例ではシンプルにそのまま終了）
-            current_width = 0;
-            current_height = 0;
-        }
-    }
+#endif
 
-    /**
-     * @brief 1フレーム分の画像データを受け取り、統計量を更新する
-     * * @param img_data JavaScriptから渡された生のピクセルデータ (RGBA, 4バイト/ピクセル)
-     * @return int 更新後のフレーム数
-     */
-    int process_bg_frame(unsigned char* img_data) {
-        if (current_width == 0 || !sum_intensity) {
-            return -1; // 初期化が完了していない場合はエラー
-        }
+// 🚨 修正: process_frame 関数から frame_data 引数を削除しました。
+// JSはC++が確保した input_frame_buffer に直接データを書き込みます。
+void init_correction_mode(uint32_t width, uint32_t height);
+void reset_accumulation();
+void set_correction_factors(float gFactor, float bFactor);
+uint32_t* process_correction_frame(uint32_t width, uint32_t height, int returnImage);
+uint32_t* process_measurement_frame(uint32_t width, uint32_t height, int returnImage);
+void cleanup();
 
-        // ピクセルごとの高速処理
-        for (int y = 0; y < current_height; y++) {
-            for (int x = 0; x < current_width; x++) {
-                // RGBAデータは4バイト/ピクセル（R, G, B, A の順）
-                // RGBAのRチャネル（インデックス0）を輝度として使用
-                // C#版のようにR, G, Bすべてを使うわけではないが、まずはシンプルにRチャネルで進める
-                long long intensity = (long long)img_data[(y * current_width + x) * 4]; 
-                
-                int index = y * current_width + x; // 1次元配列のインデックス
-
-                // 統計量の更新: ΣI と ΣI²
-                sum_intensity[index] += intensity;
-                sum_intensity_sq[index] += intensity * intensity;
-            }
-        }
-
-        frame_counter++;
-        return frame_counter;
-    }
-
-    /**
-     * @brief 計測完了後、計算に用いたメモリを解放する
-     */
-    void free_bg_memory() {
-        if (sum_intensity) free(sum_intensity);
-        if (sum_intensity_sq) free(sum_intensity_sq);
-        sum_intensity = nullptr;
-        sum_intensity_sq = nullptr;
-        current_width = 0;
-        current_height = 0;
-        frame_counter = 0;
-    }
-
-    // TODO: 後で統計量計算関数 (calculate_statistics) と結果エクスポート関数を追加
+#ifdef __cplusplus
 }
+#endif
+
+// ----------------------------------------------------------------------
+// グローバル変数の宣言
+// ----------------------------------------------------------------------
+
+// 🚨 修正: uint64_t* で積算バッファを宣言 (オーバーフロー防止)
+uint64_t* sum_r_buffer = nullptr;
+uint64_t* sum_g_buffer = nullptr;
+uint64_t* sum_b_buffer = nullptr;
+
+// 🚨 追加: JSがカメラデータを書き込むための入力バッファ
+uint8_t* input_frame_buffer = nullptr; 
+
+uint32_t* hit_count_buffer = nullptr;
+uint8_t* image_data_buffer = nullptr; 
+uint32_t* result_struct = nullptr; // JSに返す結果ポインタ構造体
+
+uint64_t* summary_r = nullptr;
+uint64_t* summary_g = nullptr;
+uint64_t* summary_b = nullptr;
+
+uint32_t pixel_count = 0;
+uint32_t frame_counter = 0;
+float g_correction_factor = 1.0f;
+float b_correction_factor = 1.0f;
+
+
+// ----------------------------------------------------------------------
+// 関数定義ブロック (extern "C")
+// ----------------------------------------------------------------------
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// 1. 初期化とメモリ確保
+EMSCRIPTEN_KEEPALIVE
+void init_correction_mode(uint32_t width, uint32_t height) {
+    if (sum_r_buffer) {
+        cleanup(); 
+    }
+    
+    pixel_count = width * height;
+    
+    size_t size_64bit = pixel_count * sizeof(uint64_t); 
+    size_t size_32bit = pixel_count * sizeof(uint32_t);
+    size_t size_frame_buffer = pixel_count * 4 * sizeof(uint8_t);
+    
+    // 積算バッファ (uint64_t)
+    sum_r_buffer = (uint64_t*)std::malloc(size_64bit);
+    sum_g_buffer = (uint64_t*)std::malloc(size_64bit);
+    sum_b_buffer = (uint64_t*)std::malloc(size_64bit);
+    
+    // 🚨 追加: 入力バッファをC++側で確保
+    input_frame_buffer = (uint8_t*)std::malloc(size_frame_buffer);
+
+    // 他のバッファの確保
+    hit_count_buffer = (uint32_t*)std::malloc(size_32bit);
+    image_data_buffer = (uint8_t*)std::malloc(size_frame_buffer); // RGBA出力用
+    
+    // 集計ポインタ（BigInt用）の確保
+    summary_r = (uint64_t*)std::malloc(sizeof(uint64_t));
+    summary_g = (uint64_t*)std::malloc(sizeof(uint64_t));
+    summary_b = (uint64_t*)std::malloc(sizeof(uint64_t));
+    
+    // 結果構造体の確保
+    result_struct = (uint32_t*)std::malloc(6 * sizeof(uint32_t));
+    
+    if (!sum_r_buffer || !hit_count_buffer || !result_struct || !input_frame_buffer) {
+        // メモリ確保失敗時のエラー処理
+        return; 
+    }
+    
+    reset_accumulation(); 
+}
+
+// 2. 蓄積のリセット
+EMSCRIPTEN_KEEPALIVE
+void reset_accumulation() {
+    if (sum_r_buffer) {
+        // 8バイト（uint64_t）単位でゼロクリア
+        std::memset(sum_r_buffer, 0, pixel_count * sizeof(uint64_t));
+        std::memset(sum_g_buffer, 0, pixel_count * sizeof(uint64_t));
+        std::memset(sum_b_buffer, 0, pixel_count * sizeof(uint64_t));
+        // uint32_tのサイズでゼロクリア
+        std::memset(hit_count_buffer, 0, pixel_count * sizeof(uint32_t));
+    }
+    if (summary_r) {
+        *summary_r = 0;
+        *summary_g = 0;
+        *summary_b = 0;
+    }
+    frame_counter = 0;
+}
+
+// 3. 補正係数の設定
+EMSCRIPTEN_KEEPALIVE
+void set_correction_factors(float gFactor, float bFactor) {
+    g_correction_factor = gFactor;
+    b_correction_factor = bFactor;
+}
+
+// 4. フレーム処理（CORRECTION_MODE）
+// 🚨 修正: frame_data 引数を削除
+EMSCRIPTEN_KEEPALIVE
+uint32_t* process_correction_frame(uint32_t width, uint32_t height, int returnImage) {
+    // ********** ⚠️ 実際の処理ロジックをここに移植してください ⚠️ **********
+    // データの読み出しは input_frame_buffer から行います。
+    // 例: uint8_t r_val = input_frame_buffer[i * 4];
+
+    frame_counter++;
+
+    // 結果構造体へのポインタ書き込み
+    if (result_struct) {
+        result_struct[0] = frame_counter;
+        result_struct[1] = (uint32_t)summary_r;
+        result_struct[2] = (uint32_t)summary_g;
+        result_struct[3] = (uint32_t)summary_b;
+        result_struct[4] = returnImage ? (uint32_t)image_data_buffer : 0;
+        result_struct[5] = pixel_count;
+    }
+    
+    return result_struct;
+}
+
+// 5. フレーム処理（MEASUREMENT_MODE）
+// 🚨 修正: frame_data 引数を削除
+EMSCRIPTEN_KEEPALIVE
+uint32_t* process_measurement_frame(uint32_t width, uint32_t height, int returnImage) {
+    // ********** ⚠️ 実際の処理ロジックをここに移植してください ⚠️ **********
+    // データの読み出しは input_frame_buffer から行います。
+
+    frame_counter++;
+    
+    // 結果構造体へのポインタ書き込み
+    if (result_struct) {
+        result_struct[0] = frame_counter;
+        result_struct[1] = (uint32_t)summary_r;
+        result_struct[2] = (uint32_t)summary_g;
+        result_struct[3] = (uint32_t)summary_b;
+        result_struct[4] = returnImage ? (uint32_t)image_data_buffer : 0;
+        result_struct[5] = pixel_count;
+    }
+    
+    return result_struct;
+}
+
+// 6. 入力バッファポインタをJSに公開
+EMSCRIPTEN_KEEPALIVE
+uint32_t get_input_frame_buffer_ptr() {
+    return (uint32_t)input_frame_buffer;
+}
+
+// 7. クリーンアップとメモリ解放
+EMSCRIPTEN_KEEPALIVE
+void cleanup() {
+    if (sum_r_buffer) {
+        std::free(sum_r_buffer); 
+        std::free(sum_g_buffer); 
+        std::free(sum_b_buffer);
+        std::free(hit_count_buffer); 
+        std::free(image_data_buffer);
+        std::free(summary_r); 
+        std::free(summary_g); 
+        std::free(summary_b);
+        std::free(result_struct);
+        
+        // 🚨 input_frame_buffer も解放
+        std::free(input_frame_buffer); 
+        
+        // ポインタを nullptr にリセット
+        sum_r_buffer = nullptr;
+        sum_g_buffer = nullptr;
+        sum_b_buffer = nullptr;
+        input_frame_buffer = nullptr;
+        hit_count_buffer = nullptr;
+        image_data_buffer = nullptr;
+        summary_r = nullptr;
+        summary_g = nullptr;
+        summary_b = nullptr;
+        result_struct = nullptr;
+    }
+    pixel_count = 0;
+    frame_counter = 0;
+}
+
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
+
+// ----------------------------------------------------------------------
+// 内部的な（非公開の）関数定義はここから下へ
+// ----------------------------------------------------------------------
