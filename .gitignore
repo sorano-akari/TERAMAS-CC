@@ -1,0 +1,4 @@
+# Emscripten SDK and build output
+emsdk/
+detector_core.js
+detector_core.wasm
