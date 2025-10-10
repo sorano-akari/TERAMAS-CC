@@ -1,233 +1,141 @@
-// detector_worker.js - 最終決定版 (ダミー malloc 削除 + フレーム処理ログ追加)
+// TERAMAS-CC: Web Worker (detector_worker.js)
+// メインスレッドから分離し、WebAssembly (Wasm) の実行と高速なフレーム処理を行います。
 
-console.log("[WORKER STARTUP] Worker script started (Native Wasm Loader)."); 
+let Module; // Emscriptenによって生成されるWasmモジュール
+let isInitialized = false;
 
-let wasmInstance = null;
-let HEAPU64 = null;
-let memory = null; 
+// ----------------------------------------------------------------------
+// 1. Wasmモジュールのロードと初期化
+// ----------------------------------------------------------------------
+// WasmのJavaScriptラッパーを読み込みます。
+self.importScripts('detector_core.js'); 
 
-let INPUT_FRAME_PTR = 0; 
-
-// ----------------------------------------------------
-// Wasmネイティブのインスタンス化
-// ----------------------------------------------------
-async function initializeWasm(wasmBinary, width, height) {
-    try {
-        // C++側のTOTAL_MEMORY=33554432 (32MB) に合わせて 512 ページを確保
-        memory = new WebAssembly.Memory({ initial: 512 }); 
+// Emscriptenモジュールの設定
+Module = {
+    // Web Worker環境向けの設定
+    locateFile: (path, prefix) => {
+        // .wasmファイルが同じディレクトリにあることを想定
+        return path;
+    },
+    onRuntimeInitialized: () => {
+        // Wasmランタイムの初期化が完了した後の処理
+        isInitialized = true;
+        self.postMessage({ type: 'STATUS', status: 'READY' });
         
-        const mutable_i32 = { value: "i32", mutable: true };
-        const immutable_i32 = { value: "i32" };
-        
-        const imports = {
-            env: {
-                memory: memory,
-                __memory_base: new WebAssembly.Global(immutable_i32, 1024), 
-                __table_base: new WebAssembly.Global(immutable_i32, 0),
-                __stack_pointer: new WebAssembly.Global(mutable_i32, 262144), 
-                
-                // LinkErrorとメモリ確保失敗を回避するため、malloc/freeの提供は停止。
+        // C++の関数をJSで扱いやすいようにラップ
+        // 'v' (void), 'i' (int), 'f' (float), 'd' (double), '*' (ポインタ)
+        Module.c_processFrame = Module.cwrap('processFrame', 'number', ['number', 'number', 'number']);
+        Module.c_resetStats = Module.cwrap('resetStats', 'void', []);
+        Module.c_setCalibrationFactors = Module.cwrap('setCalibrationFactors', 'void', ['number', 'number']);
 
-                abort: () => { console.error('Wasm aborted'); throw new Error('Wasm aborted'); },
-                _emscripten_stack_init: () => {},
-                _emscripten_stack_get_base: () => 0,
-                _emscripten_stack_get_free: () => 0,
-                __cxa_allocate_exception: (size) => { return 0; },
-                __cxa_throw: (ptr, type, destructor) => { throw new Error("C++ exception occurred."); },
-            },
-            
-            "GOT.mem": {
-                "memory": memory,
-                "sum_r_buffer": new WebAssembly.Global(mutable_i32, 0),
-                "sum_g_buffer": new WebAssembly.Global(mutable_i32, 0),
-                "sum_b_buffer": new WebAssembly.Global(mutable_i32, 0),
-                "input_frame_buffer": new WebAssembly.Global(mutable_i32, 0), 
-                "hit_count_buffer": new WebAssembly.Global(mutable_i32, 0),
-                "image_data_buffer": new WebAssembly.Global(mutable_i32, 0),
-                "result_struct": new WebAssembly.Global(mutable_i32, 0),
-                "summary_r": new WebAssembly.Global(mutable_i32, 0),
-                "summary_g": new WebAssembly.Global(mutable_i32, 0),
-                "summary_b": new WebAssembly.Global(mutable_i32, 0),
-                
-                "pixel_count": new WebAssembly.Global(mutable_i32, 0),
-                "frame_counter": new WebAssembly.Global(mutable_i32, 0),
-                "g_correction_factor": new WebAssembly.Global(mutable_i32, 0), 
-                "b_correction_factor": new WebAssembly.Global(mutable_i32, 0)
-            }
-        };
-
-        const result = await WebAssembly.instantiate(wasmBinary, imports);
-        wasmInstance = result.instance;
-        
-        HEAPU64 = new BigUint64Array(memory.buffer);
-        
-        // C++のロジックが、Wasm内部の dlmalloc を使ってメモリを確保
-        wasmInstance.exports.init_correction_mode(width, height); 
-        
-        INPUT_FRAME_PTR = wasmInstance.exports.get_input_frame_buffer_ptr();
-        if (INPUT_FRAME_PTR === 0) {
-            // dlmallocがヒープから確保に失敗した場合、このエラーが出る
-            throw new Error("WASM init error: C++ failed to allocate input buffer.");
-        }
-        console.log(`Input buffer successfully allocated by C++ at: ${INPUT_FRAME_PTR}`);
-
-        postMessage({ type: 'STATUS', message: 'WasmReady' });
-        console.log("[WORKER] WasmReady message SENT to main thread."); 
-        console.log("Native Wasm initialized. Strict Mode bypassed.");
-
-    } catch (e) {
-        console.error("Native Wasm initialization failed:", e);
-        postMessage({ type: 'ERROR', message: `Native Wasm Init Failed: ${e.toString()}` });
-    }
-}
-
-
-// ----------------------------------------------------
-// Workerからのメッセージハンドラ 
-// ----------------------------------------------------
-
-onmessage = function(e) {
-    const data = e.data;
-    const { type, width, height, buffer, gFactor, bFactor } = data;
-    let frameBuffer = buffer; 
-    
-    if (!wasmInstance && type !== 'LOAD_WASM_MODULE') {
-        postMessage({ type: 'ERROR', message: `WasmModule is not ready. Received type: ${type}` });
-        if (buffer) { 
-            postMessage({ buffer: frameBuffer }, [frameBuffer]);
-        }
-        return;
-    }
-    
-    try {
-        switch (type) {
-            
-            case 'LOAD_WASM_MODULE':
-                if (wasmInstance) return;
-                initializeWasm(data.wasmBinary, width, height); 
-                break;
-                
-            case 'INIT_CORE': 
-                wasmInstance.exports.init_correction_mode(width, height);
-                INPUT_FRAME_PTR = wasmInstance.exports.get_input_frame_buffer_ptr(); 
-                if (INPUT_FRAME_PTR === 0) throw new Error("WASM re-init failed.");
-                break;
-
-            case 'RESET_ACCUMULATION':
-                wasmInstance.exports.reset_accumulation(); 
-                break;
-                
-            case 'SET_FACTORS':
-                wasmInstance.exports.set_correction_factors(gFactor, bFactor);
-                break;
-                
-            case 'PROCESS_FRAME': 
-                
-                // 🚨 デバッグログ 1: フレーム受信を確認
-                console.log(`[WORKER] Received frame ${data.frameCount}. Processing...`);
-
-                if (INPUT_FRAME_PTR === 0 || !frameBuffer || width === 0 || height === 0 || !memory) { 
-                    postMessage({ type: 'ERROR', message: `PROCESS_FRAME received invalid context data or INPUT_FRAME_PTR is zero.` });
-                    return;
-                }
-                
-                const frameData = new Uint8ClampedArray(frameBuffer);
-                
-                const WasmHEAPU8 = new Uint8Array(memory.buffer);
-                WasmHEAPU8.set(frameData, INPUT_FRAME_PTR); 
-
-                let wasmFuncName = '';
-
-                if (data.currentMode === 'CORRECTION_MODE') {
-                    wasmFuncName = 'process_correction_frame'; 
-                } else if (data.currentMode === 'MEASUREMENT_MODE') {
-                    wasmFuncName = 'process_measurement_frame';
-                } else {
-                    postMessage({ buffer: frameBuffer }, [frameBuffer]);
-                    return;
-                }
-                
-                let resultStructPtr = wasmInstance.exports[wasmFuncName](width, height, data.returnImage ? 1 : 0);
-                
-                if (resultStructPtr === 0 || !memory.buffer) {
-                     postMessage({ type: 'ERROR', message: `WASM function returned NULL pointer (0). Frame processing failed.` });
-                     return;
-                }
-
-                // 4. 結果の取得
-                const WasmHEAPU32 = new Uint32Array(memory.buffer);
-                const resultStruct = WasmHEAPU32.subarray(resultStructPtr / 4, resultStructPtr / 4 + 6); 
-                
-                const frameCount = resultStruct[0];
-                const summary_r_ptr = resultStruct[1];
-                const summary_g_ptr = resultStruct[2];
-                const summary_b_ptr = resultStruct[3];
-                const imageDataPtr = resultStruct[4];
-                const pixelCount = resultStruct[5];
-                
-                let rSumString = "0";
-                let gSumString = "0";
-                let bSumString = "0";
-
-                // 5. BigIntとして読み込み、文字列で転送
-                if (HEAPU64 && summary_r_ptr !== 0) {
-                    if (summary_r_ptr % 8 !== 0) {
-                        console.error("Wasm Result Error: Summary pointer is not 8-byte aligned.");
-                    } else {
-                        const r_index = summary_r_ptr / 8;
-                        const g_index = summary_g_ptr / 8;
-                        const b_index = summary_b_ptr / 8;
-                        
-                        if(r_index < HEAPU64.length) rSumString = HEAPU64[r_index].toString(); 
-                        if(g_index < HEAPU64.length) gSumString = HEAPU64[g_index].toString(); 
-                        if(b_index < HEAPU64.length) bSumString = HEAPU64[b_index].toString(); 
-                    }
-                }
-                
-                // 6. メッセージの構築と画像データの転送
-                const response = {
-                    type: data.currentMode === 'CORRECTION_MODE' ? 'CORRECTION_PROCESSED' : 'PROCESSED',
-                    rSum: rSumString, 
-                    gSum: gSumString, 
-                    bSum: bSumString, 
-                    frameCount: frameCount,
-                    pixelCount: pixelCount
-                };
-                
-                const transferable = [frameBuffer]; 
-                
-                if (data.returnImage && imageDataPtr > 0) {
-                    const imageBufferSize = width * height * 4; 
-                    
-                    const imageBufferToTransfer = memory.buffer.slice(imageDataPtr, imageDataPtr + imageBufferSize);
-                    
-                    response.imageData = imageBufferToTransfer; 
-                    transferable.push(imageBufferToTransfer);  
-                }
-
-                postMessage(response, transferable);
-                // 🚨 デバッグログ 2: メッセージ送信を確認
-                console.log(`[WORKER] Frame ${frameCount} processed. Sending result back.`); 
-                
-                break;
-
-            case 'TERMINATE':
-                wasmInstance.exports.cleanup(); 
-                self.close(); 
-                break;
-                
-            default:
-                if (frameBuffer) { 
-                    postMessage({ buffer: frameBuffer }, [frameBuffer]);
-                }
-                break;
-        }
-
-    } catch (e) {
-        let errorMessage = (e && typeof e.toString === 'function') ? e.toString() : 'An unknown error occurred.';
-        postMessage({ type: 'ERROR', message: errorMessage + ' (Worker catch block)' });
-        if (frameBuffer) {
-            postMessage({ buffer: frameBuffer }, [frameBuffer]);
-        }
+        console.log("Wasm initialized and functions wrapped.");
     }
 };
+
+// ----------------------------------------------------------------------
+// 2. Wasmヒープからのデータ読み取り
+// ----------------------------------------------------------------------
+
+// C++のStats構造体のメモリレイアウト (Wasmヒープ内での配置)
+// double (8 bytes) + double (8 bytes) + long long (8 bytes) = 24 bytes
+const STATS_STRUCT_SIZE = 24;
+// DetectionResult構造体のメモリレイアウト
+// int (4 bytes) + int (4 bytes) + int (4 bytes) = 12 bytes
+// C++側では構造体がパディングされる可能性を考慮し、正確なオフセットで読み取る
+
+// Stats構造体のメンバオフセット
+const STATS_OFFSET_SUM_I = 0;       // double (8 bytes)
+const STATS_OFFSET_SUM_I_SQ = 8;    // double (8 bytes)
+const STATS_OFFSET_PIXEL_COUNT = 16; // long long (8 bytes)
+
+// DetectionResult構造体のメンバオフセット (全てint32_tとして読み込む)
+const RESULT_OFFSET_STATS_PTR = 0;       // int (4 bytes)
+const RESULT_OFFSET_EVENT_COUNT = 4;     // int (4 bytes)
+const RESULT_OFFSET_COORDS_PTR = 8;      // int (4 bytes)
+
+
+// ----------------------------------------------------------------------
+// 3. メインスレッドからのメッセージ処理
+// ----------------------------------------------------------------------
+self.onmessage = (e) => {
+    if (!isInitialized) return;
+
+    const data = e.data;
+    switch (data.type) {
+        case 'PROCESS_FRAME':
+            processFrameWasm(data.imageData, data.width, data.height);
+            break;
+        case 'RESET':
+            Module.c_resetStats();
+            break;
+        case 'SET_FACTORS':
+            Module.c_setCalibrationFactors(data.g_factor, data.b_factor);
+            break;
+    }
+};
+
+/**
+ * フレームデータをWasmコアに渡し、結果をメインスレッドに返します。
+ * @param {ImageData} imageData 
+ * @param {number} width 
+ * @param {number} height 
+ */
+function processFrameWasm(imageData, width, height) {
+    // 1. C++ヒープにImageDataをコピー
+    // imageData.data (Uint8ClampedArray) のサイズ
+    const byteLength = imageData.data.byteLength;
+    
+    // C++ヒープにメモリを割り当て (malloc相当)
+    const dataPtr = Module._malloc(byteLength);
+    
+    // JSのデータをC++ヒープに転送 (高速化のためTypedArrayのビューを使用)
+    // Module.HEAPU8 は Wasmメモリ (Uint8Array) のビュー
+    Module.HEAPU8.set(imageData.data, dataPtr);
+
+    // 2. Wasm関数を実行 (C++からDetectionResult構造体のアドレスが返る)
+    const resultPtr = Module.c_processFrame(dataPtr, width, height);
+
+    // 3. 結果の読み取り (Wasmヒープからデータを読み取る)
+
+    // DetectionResult構造体からポインタとイベント数を読み出す
+    const statsPtr = Module.getValue(resultPtr + RESULT_OFFSET_STATS_PTR, 'i32');
+    const eventCount = Module.getValue(resultPtr + RESULT_OFFSET_EVENT_COUNT, 'i32');
+    const coordsPtr = Module.getValue(resultPtr + RESULT_OFFSET_COORDS_PTR, 'i32');
+    
+    // globalStats構造体の中身を読み出す (doubleは8バイト)
+    const sum_I = Module.getValue(statsPtr + STATS_OFFSET_SUM_I, 'double');
+    const sum_I_sq = Module.getValue(statsPtr + STATS_OFFSET_SUM_I_SQ, 'double');
+    // long long は64bit整数 (i64)。JSではNumberに変換される
+    const pixel_count = Module.getValue(statsPtr + STATS_OFFSET_PIXEL_COUNT, 'i64'); 
+
+    // 4. イベント座標の読み取り
+    let events = [];
+    if (eventCount > 0) {
+        // イベント座標配列は int32_t の配列 (4バイト)
+        // [x0, y0, x1, y1, ...] が coordsPtr から始まる
+        // Module.HEAP32 は Wasmメモリの Int32Array ビュー
+        const eventDataView = Module.HEAP32.subarray(
+            coordsPtr / 4, // バイトアドレスを32bit整数のインデックスに変換
+            coordsPtr / 4 + eventCount * 2
+        );
+        // events配列にコピー (Transferableにしないため、シンプルなコピーで)
+        for (let i = 0; i < eventCount * 2; i += 2) {
+            events.push({ x: eventDataView[i], y: eventDataView[i + 1] });
+        }
+    }
+    
+    // 5. C++ヒープからメモリを解放
+    Module._free(dataPtr);
+
+    // 6. メインスレッドに統計情報とイベントデータを送信
+    self.postMessage({
+        type: 'STATS_RESULT',
+        stats: {
+            sum_I: sum_I,
+            sum_I_sq: sum_I_sq,
+            pixel_count: pixel_count,
+            event_count: eventCount, // イベント数を追加
+            events: events           // イベント座標を追加
+        }
+    });
+}

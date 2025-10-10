@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title id="main-title">TERAMAS-CC てらますしーしー</title>
+    <link rel="stylesheet" href="style.css"> 
+</head>
+<body>
+    <button id="lang-switch-button">English / 日本語</button>
+
+    <h1 id="main-header">WebAssembly 放射線計測デモ</h1>
+
+    <div id="main-container">
+        <div id="left-panel">
+            <div id="video-container">
+                <video id="camera-video" autoplay playsinline></video>
+                <canvas id="processing-canvas"></canvas>
+            </div>
+            
+<div id="control-panel">
+                <button id="preliminary-measurement-button">予備測定（調整）</button>
+                <button id="start-measurement-button" disabled>計測開始</button> 
+                <button id="reset-button" disabled>初期化・リセット</button>
+                <button id="dedicated-window-button">単独ウィンドウで開きなおす</button>
+            </div>
+            
+            <div id="display-mode-panel">
+                <h2 id="header-display-mode">画像表示モード</h2>
+                <div class="radio-group">
+                    <input type="radio" id="mode-realtime" name="displayMode" value="REALTIME" checked>
+                    <label for="mode-realtime" id="label-realtime">直接出力</label>
+                    
+                    <input type="radio" id="mode-grayscale" name="displayMode" value="GRAYSCALE">
+                    <label for="mode-grayscale" id="label-grayscale">グレースケール積算画像</label>
+                    
+                    <input type="radio" id="mode-color" name="displayMode" value="COLOR">
+                    <label for="mode-color" id="label-color">カラー積算画像</label>
+                </div>
+            </div>
+            </div>
+
+<div id="right-panel">
+            
+    <div class="status-box">
+        <h2 id="header-calib">キャリブレーション状況 (ノイズ割合)</h2>
+        <p id="progress-status" style="margin-bottom: 15px;">初期化を待機しています...</p>
+        <canvas id="correction-graph" width="300" height="50"></canvas>
+    </div>
+
+    <div class="status-box">
+        <h2>補正係数</h2>
+        <div class="factor-display">
+            <span id="g-factor-label">G/R係数:</span>
+            <span id="g-r-factor">1.0000</span>
+        </div>
+        <div class="factor-display">
+            <span id="b-factor-label">B/R係数:</span>
+            <span id="b-r-factor">1.0000</span>
+        </div>
+    </div>
+    
+    <div id="log-area">
+        <div id="log-stream">
+            </div>
+    </div>
+    
+</div>
+    </div>
+    
+    <script src="teramas-cc.js"></script> 
+</body>
+</html>

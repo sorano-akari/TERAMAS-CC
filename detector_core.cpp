@@ -1,219 +1,119 @@
+// TERAMAS-CC: Wasm Core Source (detector_core.cpp)
+// 検出アルゴリズムと高速計算を実行するC++コード。
+// Emscriptenでコンパイルされ、Web Workerから呼び出されます。
+
 #include <emscripten/emscripten.h>
-#include <cstdlib>   // std::malloc, std::free
-#include <cstring>   // std::memset, std::memcpy
-#include <cstdint>   // uint32_t, uint8_t, uint64_t 
+#include <cstdint>
+#include <cmath>
+#include <algorithm>
+
+// グローバルな定数と統計用メモリ
+// Wasmヒープ内でこの構造体を1つ保持し、結果を返すために使用します。
+struct Stats {
+    double sum_I = 0.0;
+    double sum_I_sq = 0.0;
+    long long pixel_count = 0;
+};
 
 // ----------------------------------------------------------------------
-// Wasmリンクの安定化: C互換性とプロトタイプ宣言
+// Wasmヒープ上のグローバルなStatsオブジェクト
 // ----------------------------------------------------------------------
+// このアドレス（ポインタ）をJS側に渡し、JS側でデータを読み取ります。
+Stats globalStats;
 
-#ifdef __cplusplus
+// ----------------------------------------------------------------------
+// 補正係数
+// ----------------------------------------------------------------------
+// Rチャネルを基準（1.0）とし、GとBチャネルの不均一性を補正するための係数。
+// JS側から _setCalibrationFactors で設定されます。
+float G_FACTOR = 1.0f;
+float B_FACTOR = 1.0f;
+
+// ----------------------------------------------------------------------
+// sRGB逆ガンマ補正関数 (Linearity Correction)
+// ----------------------------------------------------------------------
+// 8-bit値 (0-255) から、電荷量に比例する線形な輝度値 (0.0-1.0) に変換します。
+// これが、正確な物理量計測のための最も重要なステップです。
+float inverseGammaCorrection(uint8_t component) {
+    // 0.0から1.0の範囲に正規化
+    float v = (float)component / 255.0f;
+
+    if (v <= 0.04045f) {
+        // 線形部分
+        return v / 12.92f;
+    } else {
+        // 非線形（べき乗）部分
+        return std::pow((v + 0.055f) / 1.055f, 2.4f);
+    }
+}
+
+// ----------------------------------------------------------------------
+// 1. フレーム処理と統計計算
+// ----------------------------------------------------------------------
+// ImageData.data (Uint8ClampedArray) を受け取り、統計情報を更新します。
+// Wasmにエクスポートされ、Web Workerから呼び出されます。
 extern "C" {
-#endif
 
-// 🚨 修正: process_frame 関数から frame_data 引数を削除しました。
-// JSはC++が確保した input_frame_buffer に直接データを書き込みます。
-void init_correction_mode(uint32_t width, uint32_t height);
-void reset_accumulation();
-void set_correction_factors(float gFactor, float bFactor);
-uint32_t* process_correction_frame(uint32_t width, uint32_t height, int returnImage);
-uint32_t* process_measurement_frame(uint32_t width, uint32_t height, int returnImage);
-void cleanup();
-
-#ifdef __cplusplus
-}
-#endif
-
-// ----------------------------------------------------------------------
-// グローバル変数の宣言
-// ----------------------------------------------------------------------
-
-// 🚨 修正: uint64_t* で積算バッファを宣言 (オーバーフロー防止)
-uint64_t* sum_r_buffer = nullptr;
-uint64_t* sum_g_buffer = nullptr;
-uint64_t* sum_b_buffer = nullptr;
-
-// 🚨 追加: JSがカメラデータを書き込むための入力バッファ
-uint8_t* input_frame_buffer = nullptr; 
-
-uint32_t* hit_count_buffer = nullptr;
-uint8_t* image_data_buffer = nullptr; 
-uint32_t* result_struct = nullptr; // JSに返す結果ポインタ構造体
-
-uint64_t* summary_r = nullptr;
-uint64_t* summary_g = nullptr;
-uint64_t* summary_b = nullptr;
-
-uint32_t pixel_count = 0;
-uint32_t frame_counter = 0;
-float g_correction_factor = 1.0f;
-float b_correction_factor = 1.0f;
-
-
-// ----------------------------------------------------------------------
-// 関数定義ブロック (extern "C")
-// ----------------------------------------------------------------------
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-// 1. 初期化とメモリ確保
 EMSCRIPTEN_KEEPALIVE
-void init_correction_mode(uint32_t width, uint32_t height) {
-    if (sum_r_buffer) {
-        cleanup(); 
-    }
-    
-    pixel_count = width * height;
-    
-    size_t size_64bit = pixel_count * sizeof(uint64_t); 
-    size_t size_32bit = pixel_count * sizeof(uint32_t);
-    size_t size_frame_buffer = pixel_count * 4 * sizeof(uint8_t);
-    
-    // 積算バッファ (uint64_t)
-    sum_r_buffer = (uint64_t*)std::malloc(size_64bit);
-    sum_g_buffer = (uint64_t*)std::malloc(size_64bit);
-    sum_b_buffer = (uint64_t*)std::malloc(size_64bit);
-    
-    // 🚨 追加: 入力バッファをC++側で確保
-    input_frame_buffer = (uint8_t*)std::malloc(size_frame_buffer);
+int processFrame(const uint8_t* data_ptr, int width, int height) {
+    const int num_pixels = width * height;
 
-    // 他のバッファの確保
-    hit_count_buffer = (uint32_t*)std::malloc(size_32bit);
-    image_data_buffer = (uint8_t*)std::malloc(size_frame_buffer); // RGBA出力用
+    // R, G, Bの輝度合計と二乗合計をフレームごとに積算するための変数
+    // ここでは、グローバルなStatsオブジェクトに直接加算します。
     
-    // 集計ポインタ（BigInt用）の確保
-    summary_r = (uint64_t*)std::malloc(sizeof(uint64_t));
-    summary_g = (uint64_t*)std::malloc(sizeof(uint64_t));
-    summary_b = (uint64_t*)std::malloc(sizeof(uint64_t));
-    
-    // 結果構造体の確保
-    result_struct = (uint32_t*)std::malloc(6 * sizeof(uint32_t));
-    
-    if (!sum_r_buffer || !hit_count_buffer || !result_struct || !input_frame_buffer) {
-        // メモリ確保失敗時のエラー処理
-        return; 
-    }
-    
-    reset_accumulation(); 
-}
-
-// 2. 蓄積のリセット
-EMSCRIPTEN_KEEPALIVE
-void reset_accumulation() {
-    if (sum_r_buffer) {
-        // 8バイト（uint64_t）単位でゼロクリア
-        std::memset(sum_r_buffer, 0, pixel_count * sizeof(uint64_t));
-        std::memset(sum_g_buffer, 0, pixel_count * sizeof(uint64_t));
-        std::memset(sum_b_buffer, 0, pixel_count * sizeof(uint64_t));
-        // uint32_tのサイズでゼロクリア
-        std::memset(hit_count_buffer, 0, pixel_count * sizeof(uint32_t));
-    }
-    if (summary_r) {
-        *summary_r = 0;
-        *summary_g = 0;
-        *summary_b = 0;
-    }
-    frame_counter = 0;
-}
-
-// 3. 補正係数の設定
-EMSCRIPTEN_KEEPALIVE
-void set_correction_factors(float gFactor, float bFactor) {
-    g_correction_factor = gFactor;
-    b_correction_factor = bFactor;
-}
-
-// 4. フレーム処理（CORRECTION_MODE）
-// 🚨 修正: frame_data 引数を削除
-EMSCRIPTEN_KEEPALIVE
-uint32_t* process_correction_frame(uint32_t width, uint32_t height, int returnImage) {
-    // ********** ⚠️ 実際の処理ロジックをここに移植してください ⚠️ **********
-    // データの読み出しは input_frame_buffer から行います。
-    // 例: uint8_t r_val = input_frame_buffer[i * 4];
-
-    frame_counter++;
-
-    // 結果構造体へのポインタ書き込み
-    if (result_struct) {
-        result_struct[0] = frame_counter;
-        result_struct[1] = (uint32_t)summary_r;
-        result_struct[2] = (uint32_t)summary_g;
-        result_struct[3] = (uint32_t)summary_b;
-        result_struct[4] = returnImage ? (uint32_t)image_data_buffer : 0;
-        result_struct[5] = pixel_count;
-    }
-    
-    return result_struct;
-}
-
-// 5. フレーム処理（MEASUREMENT_MODE）
-// 🚨 修正: frame_data 引数を削除
-EMSCRIPTEN_KEEPALIVE
-uint32_t* process_measurement_frame(uint32_t width, uint32_t height, int returnImage) {
-    // ********** ⚠️ 実際の処理ロジックをここに移植してください ⚠️ **********
-    // データの読み出しは input_frame_buffer から行います。
-
-    frame_counter++;
-    
-    // 結果構造体へのポインタ書き込み
-    if (result_struct) {
-        result_struct[0] = frame_counter;
-        result_struct[1] = (uint32_t)summary_r;
-        result_struct[2] = (uint32_t)summary_g;
-        result_struct[3] = (uint32_t)summary_b;
-        result_struct[4] = returnImage ? (uint32_t)image_data_buffer : 0;
-        result_struct[5] = pixel_count;
-    }
-    
-    return result_struct;
-}
-
-// 6. 入力バッファポインタをJSに公開
-EMSCRIPTEN_KEEPALIVE
-uint32_t get_input_frame_buffer_ptr() {
-    return (uint32_t)input_frame_buffer;
-}
-
-// 7. クリーンアップとメモリ解放
-EMSCRIPTEN_KEEPALIVE
-void cleanup() {
-    if (sum_r_buffer) {
-        std::free(sum_r_buffer); 
-        std::free(sum_g_buffer); 
-        std::free(sum_b_buffer);
-        std::free(hit_count_buffer); 
-        std::free(image_data_buffer);
-        std::free(summary_r); 
-        std::free(summary_g); 
-        std::free(summary_b);
-        std::free(result_struct);
+    for (int i = 0; i < num_pixels; ++i) {
+        // RGBAデータは4バイト（R, G, B, A）で1ピクセル
+        int data_index = i * 4;
         
-        // 🚨 input_frame_buffer も解放
-        std::free(input_frame_buffer); 
+        // 8bit RGB値を取得
+        uint8_t R_8bit = data_ptr[data_index];
+        uint8_t G_8bit = data_ptr[data_index + 1];
+        uint8_t B_8bit = data_ptr[data_index + 2];
         
-        // ポインタを nullptr にリセット
-        sum_r_buffer = nullptr;
-        sum_g_buffer = nullptr;
-        sum_b_buffer = nullptr;
-        input_frame_buffer = nullptr;
-        hit_count_buffer = nullptr;
-        image_data_buffer = nullptr;
-        summary_r = nullptr;
-        summary_g = nullptr;
-        summary_b = nullptr;
-        result_struct = nullptr;
+        // 1. 逆ガンマ補正を適用し、線形な物理量に変換 (0.0 - 1.0)
+        float I_R = inverseGammaCorrection(R_8bit);
+        float I_G = inverseGammaCorrection(G_8bit);
+        float I_B = inverseGammaCorrection(B_8bit);
+
+        // 2. キャリブレーション係数を適用
+        // Rチャネルを基準とし、G, Bチャネルの感度差を補正
+        float I_G_calibrated = I_G * G_FACTOR;
+        float I_B_calibrated = I_B * B_FACTOR;
+        
+        // 3. 3つのチャネルの平均を線形輝度Iとして算出
+        // これが電荷量に比例する値です
+        double I = (I_R + I_G_calibrated + I_B_calibrated) / 3.0;
+
+        // 4. グローバルな統計情報に積算
+        globalStats.sum_I += I;
+        globalStats.sum_I_sq += (I * I);
+        globalStats.pixel_count += 1;
     }
-    pixel_count = 0;
-    frame_counter = 0;
+
+    // globalStatsオブジェクトのメモリアドレス（ポインタ）を整数として返す
+    // JS側はこのアドレスから globalStats の内容を読み出します。
+    return (int)&globalStats;
 }
 
+// ----------------------------------------------------------------------
+// 2. 統計情報のリセット
+// ----------------------------------------------------------------------
+// JS側から呼び出され、統計情報を初期化します。
+EMSCRIPTEN_KEEPALIVE
+void resetStats() {
+    globalStats.sum_I = 0.0;
+    globalStats.sum_I_sq = 0.0;
+    globalStats.pixel_count = 0;
+}
 
-#ifdef __cplusplus
+// ----------------------------------------------------------------------
+// 3. キャリブレーション係数の設定
+// ----------------------------------------------------------------------
+// 予備測定で得られた補正係数をWasmコアに設定します。
+EMSCRIPTEN_KEEPALIVE
+void setCalibrationFactors(float g_factor, float b_factor) {
+    G_FACTOR = g_factor;
+    B_FACTOR = b_factor;
+}
+
 } // extern "C"
-#endif
-
-// ----------------------------------------------------------------------
-// 内部的な（非公開の）関数定義はここから下へ
-// ----------------------------------------------------------------------

@@ -1,5 +1,5 @@
-# TERRA-MON: 地球規模放射線計測ネットワーク
-# TERRA-MON: Global Radiation Measurement Network
+# TERAMAS-CC: シチズンサイエンス地球放射線マッピングシステム（てらますしーしー）
+# TERAMAS-CC: TErra RAdiation MApping System by Citizens' Cameras: TERAMAS-CC project's repository.
 
 [![GitHub license](https://img.shields.io/github/license/user/terra-mon?style=flat-square)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/user/terra-mon/stargazers?style=flat-square)](https://github.com/user/terra-mon/stargazers)

@@ -4,32 +4,161 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title id="main-title">TERAMAS-CC てらますしーしー</title>
-    <link rel="stylesheet" href="style.css"> 
+    <!-- 以前存在した外部CSS参照は、描画エラー回避のため削除されました。 -->
+    
+    <style>
+        /* CSSの統合 (teramas-cc.jsにあったスタイルを統合) */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f4f7f9;
+            color: #333;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #main-header {
+            color: #654ff0;
+            margin-bottom: 20px;
+        }
+        #main-container {
+            display: flex;
+            gap: 20px;
+            width: 90%;
+            max-width: 1200px;
+        }
+        #left-panel {
+            flex: 2;
+            min-width: 300px;
+        }
+        #right-panel {
+            flex: 1;
+            min-width: 300px;
+        }
+        #video-container {
+            position: relative;
+            width: 100%;
+            height: auto;
+            background-color: #000;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            aspect-ratio: 4/3; /* 640x480 */
+        }
+        #camera-video, #processing-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            object-fit: cover;
+        }
+        #processing-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            opacity: 1.0; /* 描画確認のため1.0に設定 */
+            z-index: 10;
+        }
+        #control-panel, .status-box, #display-mode-panel {
+            background-color: #ffffff;
+            padding: 20px;
+            border-radius: 12px;
+            margin-top: 20px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+        }
+        button {
+            background-color: #654ff0;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            font-weight: bold;
+            margin-right: 10px;
+            margin-top: 5px;
+        }
+        button:hover:not(:disabled) {
+            background-color: #4f3dbd;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .factor-display {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 1.1em;
+            font-weight: bold;
+        }
+        #correction-graph {
+            border: 1px solid #eee;
+            border-radius: 6px;
+        }
+        .radio-group {
+            display: flex;
+            gap: 15px;
+            margin-top: 10px;
+        }
+        .radio-group input[type="radio"] {
+            display: none;
+        }
+        .radio-group label {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background-color 0.2s, border-color 0.2s;
+        }
+        .radio-group input[type="radio"]:checked + label {
+            background-color: #654ff0;
+            color: white;
+            border-color: #654ff0;
+        }
+        
+        /* Responsive Design */
+        @media (max-width: 768px) {
+            #main-container {
+                flex-direction: column;
+                width: 100%;
+            }
+            #control-panel button {
+                display: block;
+                width: 100%;
+                margin: 5px 0;
+            }
+        }
+    </style>
 </head>
 <body>
     <button id="lang-switch-button">English / 日本語</button>
 
-    <h1 id="main-header">WebAssembly 放射線計測デモ</h1>
+    <h1 id="main-header">TERAMAS-CC WebAssembly 放射線計測デモ</h1>
 
     <div id="main-container">
         <div id="left-panel">
+            <!-- カメラとキャンバスのコンテナ -->
             <div id="video-container">
                 <video id="camera-video" autoplay playsinline></video>
+                <!-- 処理結果の可視化レイヤー -->
                 <canvas id="processing-canvas"></canvas>
             </div>
             
-<div id="control-panel">
+            <!-- 制御パネル -->
+            <div id="control-panel">
                 <button id="preliminary-measurement-button">予備測定（調整）</button>
                 <button id="start-measurement-button" disabled>計測開始</button> 
                 <button id="reset-button" disabled>初期化・リセット</button>
-                <button id="dedicated-window-button">単独ウィンドウで開きなおす</button>
+                <!-- <button id="dedicated-window-button">単独ウィンドウで開きなおす</button> -->
             </div>
             
+            <!-- 表示モードパネル -->
             <div id="display-mode-panel">
                 <h2 id="header-display-mode">画像表示モード</h2>
                 <div class="radio-group">
                     <input type="radio" id="mode-realtime" name="displayMode" value="REALTIME" checked>
-                    <label for="mode-realtime" id="label-realtime">直接出力</label>
+                    <label for="mode-realtime" id="label-realtime">直接出力 (検出イベント)</label>
                     
                     <input type="radio" id="mode-grayscale" name="displayMode" value="GRAYSCALE">
                     <label for="mode-grayscale" id="label-grayscale">グレースケール積算画像</label>
@@ -38,36 +167,42 @@
                     <label for="mode-color" id="label-color">カラー積算画像</label>
                 </div>
             </div>
-            </div>
+        </div>
 
-<div id="right-panel">
+        <div id="right-panel">
             
-    <div class="status-box">
-        <h2 id="header-calib">キャリブレーション状況 (ノイズ割合)</h2>
-        <p id="progress-status" style="margin-bottom: 15px;">初期化を待機しています...</p>
-        <canvas id="correction-graph" width="300" height="50"></canvas>
-    </div>
-
-    <div class="status-box">
-        <h2>補正係数</h2>
-        <div class="factor-display">
-            <span id="g-factor-label">G/R係数:</span>
-            <span id="g-r-factor">1.0000</span>
-        </div>
-        <div class="factor-display">
-            <span id="b-factor-label">B/R係数:</span>
-            <span id="b-r-factor">1.0000</span>
-        </div>
-    </div>
-    
-    <div id="log-area">
-        <div id="log-stream">
+            <!-- キャリブレーションステータス -->
+            <div class="status-box">
+                <h2 id="header-calib">キャリブレーション状況 (ノイズ割合)</h2>
+                <p id="progress-status" style="margin-bottom: 15px;">初期化を待機しています...</p>
+                <canvas id="correction-graph" width="300" height="50"></canvas>
             </div>
+
+            <!-- 補正係数表示 -->
+            <div class="status-box">
+                <h2>補正係数</h2>
+                <div class="factor-display">
+                    <span id="g-factor-label">G/R係数:</span>
+                    <span id="g-r-factor">1.0000</span>
+                </div>
+                <div class="factor-display">
+                    <span id="b-factor-label">B/R係数:</span>
+                    <span id="b-r-factor">1.0000</span>
+                </div>
+            </div>
+            
+            <!-- ログストリーム -->
+            <div class="status-box">
+                <h2>システムログ</h2>
+                <div id="log-area" style="height: 200px; overflow-y: scroll; background-color: #2c3e50; color: #ecf0f1; padding: 10px; border-radius: 6px;">
+                    <div id="log-stream"></div>
+                </div>
+            </div>
+        </div>
     </div>
     
-</div>
-    </div>
-    
-    <script src="teramas-cc.js"></script> 
+    <!-- スクリプトのロード (モジュールとしてロード) -->
+    <script src="teramas-cc.js"></script>
+    <script src="detector_worker.js"></script> <!-- Workerをメインスレッドで直接実行するわけではないが、参照として配置 -->
 </body>
 </html>
