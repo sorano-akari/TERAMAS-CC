@@ -7,5 +7,10 @@
         "limits": "cpp",
         "ratio": "cpp",
         "variant": "cpp"
-    }
+    },
+
+    "files.exclude": {
+        "emsdk": true,
+        "**/.vscode": true
+    }   
 }
