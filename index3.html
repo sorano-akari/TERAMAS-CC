@@ -3,71 +3,1015 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title id="main-title">TERAMAS-CC てらますしーしー</title>
-    <link rel="stylesheet" href="style.css"> 
+    <title>TERAMAS-CC: てらますしーしー</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Interフォントの設定 */
+        body { font-family: 'Inter', sans-serif; background-color: #0d1117; color: #c9d1d9; }
+        /* ビデオ要素を非表示にして、画面外に配置 */
+        #video-feed { position: absolute; left: -9999px; }
+        /* メッセージボックスのスタイル */
+        .message-box { padding: 12px; border-radius: 8px; margin-bottom: 16px; font-weight: 500; }
+        .info { background-color: #1a2c49; border-left: 4px solid #38bdf8; }
+        .warning { background-color: #49331a; border-left: 4px solid #fbbf24; }
+        .error { background-color: #491a1a; border-left: 4px solid #f83838; }
+        /* 入力フィールドの基本スタイルを統一 */
+        input[type="number"] {
+            -moz-appearance: textfield;
+            appearance: textfield;
+        }
+        input[type="number"]::-webkit-outer-spin-button,
+        input[type="number"]::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        /* キャンバスのスタイル (アスペクト比維持のため調整) */
+        #display-canvas {
+            width: 100%;
+            height: auto;
+            max-height: 480px; /* 見やすい最大高さを設定 */
+            background-color: #000;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            /* object-fit: contain のような効果を実現 */
+            display: block; 
+        }
+    </style>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>
+        // LucideアイコンをDOMに適用
+        window.addEventListener('load', () => {
+            if (typeof lucide !== 'undefined' && lucide.createIcons) {
+                lucide.createIcons();
+            }
+        });
+    </script>
 </head>
-<body>
-    <button id="lang-switch-button">English / 日本語</button>
+<body class="p-4 sm:p-8 min-h-screen">
 
-    <h1 id="main-header">WebAssembly 放射線計測デモ</h1>
+    <div class="max-w-4xl mx-auto">
+        <header class="text-center mb-10">
+            <div class="flex justify-between items-center mb-4">
+                <!-- 言語切り替えボタン -->
+                <button id="lang-button" class="text-sm font-semibold px-3 py-1 bg-[#1f242d] rounded-lg hover:bg-gray-700 transition duration-150"></button>
+                <h1 id="main-header" class="text-3xl sm:text-4xl font-extrabold text-[#38bdf8] tracking-tight flex items-center justify-center mx-auto">
+                    <i data-lucide="Radiation" class="w-8 h-8 mr-3"></i>
+                </h1>
+                <div class="w-1/4 h-8"></div> <!-- Spacer for alignment -->
+            </div>
+            <p id="main-subtitle" class="text-xl text-gray-400 mt-2">地球規模放射線計測ネットワーク</p>
+        </header>
 
-    <div id="main-container">
-        <div id="left-panel">
-            <div id="video-container">
-                <video id="camera-video" autoplay playsinline></video>
-                <canvas id="processing-canvas"></canvas>
-            </div>
-            
-<div id="control-panel">
-                <button id="preliminary-measurement-button">予備測定（調整）</button>
-                <button id="start-measurement-button" disabled>計測開始</button> 
-                <button id="reset-button" disabled>初期化・リセット</button>
-                <button id="dedicated-window-button">単独ウィンドウで開きなおす</button>
-            </div>
-            
-            <div id="display-mode-panel">
-                <h2 id="header-display-mode">画像表示モード</h2>
-                <div class="radio-group">
-                    <input type="radio" id="mode-realtime" name="displayMode" value="REALTIME" checked>
-                    <label for="mode-realtime" id="label-realtime">直接出力</label>
-                    
-                    <input type="radio" id="mode-grayscale" name="displayMode" value="GRAYSCALE">
-                    <label for="mode-grayscale" id="label-grayscale">グレースケール積算画像</label>
-                    
-                    <input type="radio" id="mode-color" name="displayMode" value="COLOR">
-                    <label for="mode-color" id="label-color">カラー積算画像</label>
+        <main class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <!-- 測定ステータスとカメラフィード -->
+            <div class="lg:col-span-2 bg-[#161b22] p-6 rounded-xl shadow-2xl">
+                <h2 id="status-header" class="text-2xl font-semibold mb-4 text-gray-200 flex items-center">
+                    <i data-lucide="Camera" class="w-5 h-5 mr-2"></i>
+                </h2>
+
+                <div id="message-container">
+                    <!-- ステータスメッセージを挿入 -->
+                </div>
+                
+                <!-- メイン表示キャンバス (生動画/積算画像) -->
+                <!-- CSSでmax-heightを設定し、JSでネイティブ比率を維持して描画 -->
+                <canvas id="display-canvas" class="w-full"></canvas>
+
+                <!-- カメラフィード (非表示) -->
+                <video id="video-feed" playsinline autoplay muted></video>
+                <!-- フレーム処理用キャンバス (非表示) -->
+                <canvas id="processing-canvas" class="hidden"></canvas>
+
+                <!-- 表示モード切り替え -->
+                <div class="mt-4 p-3 bg-[#1f242d] rounded-lg">
+                    <p id="display-mode-label" class="text-gray-400 text-sm mb-2"></p>
+                    <div id="display-mode-controls" class="flex flex-wrap gap-4">
+                        <!-- ラジオボタンはJSでセットアップ -->
+                    </div>
+                </div>
+
+                <div class="mt-4 space-y-3">
+                    <button id="preliminary-button" class="w-full py-3 bg-yellow-600 text-gray-900 font-bold rounded-lg shadow-lg hover:bg-yellow-500 transition duration-200 disabled:opacity-50" disabled></button>
+                    <button id="start-button" class="w-full py-3 bg-[#38bdf8] text-gray-900 font-bold rounded-lg shadow-lg hover:bg-[#5ed3ff] transition duration-200 disabled:opacity-50" disabled></button>
+                    <div class="grid grid-cols-2 gap-3">
+                        <button id="reset-button" class="py-2 bg-gray-600 text-gray-100 font-semibold rounded-lg hover:bg-gray-500 transition duration-200 disabled:opacity-50" disabled></button>
+                        <button id="dedicated-window-button" class="py-2 bg-gray-700 text-gray-100 font-semibold rounded-lg hover:bg-gray-600 transition duration-200 disabled:opacity-50"></button>
+                    </div>
+                </div>
+
+                <div class="mt-6 p-4 bg-[#1f242d] rounded-lg text-sm">
+                    <p><strong>ユーザーID (あなたの観測者ID):</strong> <span id="user-id" class="font-mono text-xs text-[#8b949e]">認証中...</span></p>
                 </div>
             </div>
-            </div>
 
-<div id="right-panel">
+            <!-- 観測データと統計 -->
+            <div id="stats-panel" class="lg:col-span-1 bg-[#161b22] p-6 rounded-xl shadow-2xl">
+                <h2 id="network-stats-header" class="text-2xl font-semibold mb-4 text-gray-200 flex items-center">
+                    <i data-lucide="Globe" class="w-5 h-5 mr-2"></i>
+                </h2>
+
+                <div id="stats-display" class="space-y-4 text-sm">
+                    <div class="p-3 bg-[#1f242d] rounded-lg">
+                        <p class="text-gray-400">グローバル総フレーム数</p>
+                        <p id="global-frames" class="text-xl font-bold text-[#5ed3ff]">---</p>
+                    </div>
+                    <div class="p-3 bg-[#1f242d] rounded-lg">
+                        <p class="text-gray-400">最終更新時刻</p>
+                        <p id="global-last-update" class="text-base text-[#8b949e]">---</p>
+                    </div>
+                </div>
+
+                <h3 id="local-stats-header" class="text-xl font-semibold mt-8 mb-4 border-t border-gray-700 pt-4 text-gray-200">
+                    <!-- Your Device Stats (Phase 1) -->
+                </h3>
+                <div class="space-y-3 text-sm">
+                    <!-- 予備測定目標フレーム数設定 -->
+                    <div class="p-3 bg-[#1f242d] rounded-lg">
+                        <label id="target-frames-label" for="target-frames-input" class="text-gray-400 text-sm"></label>
+                        <input type="number" id="target-frames-input" value="300" min="10" class="w-full mt-1 p-2 bg-gray-700 border border-gray-600 rounded-md font-mono text-base text-gray-300 focus:ring-blue-500 focus:border-blue-500">
+                    </div>
+                    
+                    <!-- ノイズ補正係数表示エリア -->
+                    <h4 id="header-calib" class="text-gray-400 text-sm"></h4>
+                    <div class="grid grid-cols-2 gap-3">
+                         <div class="p-3 bg-[#1f242d] rounded-lg">
+                            <p id="factor-gr-label" class="text-gray-400 text-xs"></p>
+                            <p id="factor-br-value" class="font-mono text-base text-gray-300">1.000</p>
+                        </div>
+                        <div class="p-3 bg-[#1f242d] rounded-lg">
+                            <p id="factor-br-label" class="text-gray-400 text-xs"></p>
+                            <p id="factor-br-value" class="font-mono text-base text-gray-300">1.000</p>
+                        </div>
+                    </div>
+                    
+                    <div class="p-3 bg-[#1f242d] rounded-lg">
+                        <p class="text-gray-400">平均輝度 (線形化後 $\mu$)</p>
+                        <p id="local-mean" class="font-mono text-lg text-green-400">0.000</p>
+                    </div>
+                    <div class="p-3 bg-[#1f242d] rounded-lg">
+                        <p class="text-gray-400">輝度分散 ($\sigma^2$)</p>
+                        <p id="local-variance" class="font-mono text-lg text-yellow-400">0.000</p>
+                    </div>
+                </div>
+
+                <div class="mt-6 p-3 bg-gray-800 rounded-lg text-xs text-gray-400">
+                    <p>現在のフェーズ1では、**ノイズの平均 ($\mu$) と分散 ($\sigma^2$)** を正確に計測しています。これは、将来的に放射線イベントを識別するための基礎となります。</p>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, updateDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firestoreのログレベルを設定 (デバッグ用)
+        setLogLevel('debug');
+
+        // ====================================================================
+        // 0. 言語パック
+        // ====================================================================
+
+        const LANG_PACK = {
+            "ja": {
+                "mainTitle": "TERAMAS-CC てらますしーしー",
+                "mainHeader": "測定ステータス",
+                "networkStatsHeader": "ネットワーク統計",
+                "localStatsHeader": "あなたのデバイス統計 (Phase 1)",
+                "preliminaryButton": "予備測定（調整）",
+                "startButton": "計測開始",
+                "resetButton": "初期化・リセット",
+                "dedicatedWindowButton": "単独ウィンドウで開きなおす",
+                "headerCalib": "キャリブレーション状況 (ノイズ割合)",
+                "targetFramesLabel": "予備測定目標フレーム数:", 
+                "factorGRLabel": "G/R係数:",
+                "factorBRLabel": "B/R係数:",
+                "langButton": "English / 日本語",      
+                "displayModeLabel": "表示モード",
+                "displayModeRealtime": "生動画",
+                "displayModeGrayscale": "白黒積算画像",
+                "displayModeColor": "カラー積算画像",
+                "statusInitialReady": "カメラ接続を待機しています。",
+                "statusLangHint": "English version is available. Click the English / 日本語 button around left-top to switch.", 
+                "statusInit": "システム起動処理中...",
+                "statusWasmReady": "Wasmコアエミュレーション (Web Worker) 起動成功。",
+                "statusCamera": "カメラアクセス成功。",
+                "statusCoreInit": "C++コア初期化中...",
+                "statusReady": "予備測定（調整）ボタンを押してキャリブレーションを開始してください。",
+                "statusCalib": "予備測定（調整）中 - ノイズ積算 ( %s / %s フレーム )",
+                "statusCalibDone": "予備測定完了。計測開始ボタンを押してください。",
+                "statusMeasure": "本計測中",
+                "statusComplete": "計測完了! 結果出力中...",
+                "statusError": "エラー",
+                "statusAlreadyInit": "既に計測を開始しています。",
+                "statusReset": "システムを初期化しました。",
+                "statusWindowInfo": "計測の安定性のため、単独ウィンドウでの実行を推奨します。",
+                "statusWindowOpened": "新しい単独ウィンドウで開きました。計測を続けるには、元のウィンドウを閉じてください。",
+                "statusThrottle": "（警告）ブラウザが抑制中です。タブをアクティブにしてください。",
+                "statusFactorUpdate": "補正係数を更新しました (G: %s, B: %s)",
+                "statusInitFailed": "ネットワーク機能の初期化に失敗しました。ローカルでの測定は可能です。",
+                "statusDisplayModeChanged_REALTIME": "表示モードを「生動画」に切り替えました。", 
+                "statusDisplayModeChanged_GRAYSCALE": "表示モードを「白黒積算画像」に切り替えました。",
+                "statusDisplayModeChanged_COLOR": "表示モードを「カラー積算画像 (未実装)」に切り替えました。",
+                "userIdFallback": "ネットワーク機能停止中 (ローカルモード)",
+                "networkDisabledMessage": "（重要）ネットワーク接続が無効のため、グローバル統計の取得・送信は行われません。"
+            },
+            "en": {
+                "mainTitle": "TERAMAS-CC (Radiation Measurement)",
+                "mainHeader": "Measurement Status",
+                "networkStatsHeader": "Network Statistics",
+                "localStatsHeader": "Your Device Statistics (Phase 1)",
+                "preliminaryButton": "Preliminary Measurement (Adjust)",
+                "startButton": "Start Measurement",
+                "resetButton": "Initialize & Reset",
+                "dedicatedWindowButton": "Open in Dedicated Window",
+                "headerCalib": "Calibration Status (Noise Ratio)",
+                "targetFramesLabel": "Target Preliminary Frames:",
+                "factorGRLabel": "G/R Factor:",
+                "factorBRLabel": "B/R Factor:",
+                "langButton": "日本語 / English",
+                "displayModeLabel": "Display Mode",
+                "displayModeRealtime": "Realtime Video",
+                "displayModeGrayscale": "Grayscale Accumulation",
+                "displayModeColor": "Color Accumulation",
+                "statusInitialReady": "Waiting for camera connection.",
+                "statusLangHint": "日本語版も利用可能です。English / 日本語ボタンで切り替えてください。",
+                "statusInit": "Starting system initialization...",
+                "statusWasmReady": "Wasm Core Emulation (Web Worker) ready.",
+                "statusCamera": "Camera access successful.",
+                "statusCoreInit": "Initializing C++ Core...",
+                "statusReady": "Press the Preliminary Measurement (Adjust) button to start calibration.",
+                "statusCalib": "Preliminary Measurement (Adjusting) - Noise Accumulation ( %s / %s frames )",
+                "statusCalibDone": "Preliminary measurement complete. Press Start Measurement to begin.",
+                "statusMeasure": "Main Measurement",
+                "statusComplete": "Measurement complete! Outputting results...",
+                "statusError": "Error",
+                "statusAlreadyInit": "Measurement already started.",
+                "statusReset": "System initialized and reset.",
+                "statusWindowInfo": "For best stability, running in a dedicated window is recommended.",
+                "statusWindowOpened": "Opened in a new dedicated window. Please close the original window to continue measurement.",
+                "statusThrottle": "(WARNING) Browser is throttling. Please keep the tab active.",
+                "statusFactorUpdate": "Correction factors updated (G: %s, B: %s)",
+                "statusInitFailed": "Failed to initialize network features. Local measurement is still possible.",
+                "statusDisplayModeChanged_REALTIME": "Display mode: Realtime Video.", 
+                "statusDisplayModeChanged_GRAYSCALE": "Display mode: Grayscale Accumulation.",
+                "statusDisplayModeChanged_COLOR": "Display mode: Color Accumulation (Not Implemented).",
+                "userIdFallback": "Network Disabled (Local Mode)",
+                "networkDisabledMessage": "(IMPORTANT) Global stats and data submission are disabled due to network connection failure."
+            }
+        };
+
+        // 表示モードの定数
+        const DISPLAY_MODE = {
+            REALTIME: 'REALTIME',
+            GRAYSCALE: 'GRAYSCALE',
+            COLOR: 'COLOR',
+        };
+
+        // ====================================================================
+        // 1. グローバル定数と初期化
+        // ====================================================================
+        
+        // Canvas環境から提供されるグローバル変数を使用
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-terra-mon-app';
+        let firebaseConfig = null;
+        try {
+            // __firebase_configはJSON文字列として提供されることを前提とする
+            firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        } catch (e) {
+            console.error("FIREBASE INIT ERROR: Failed to parse __firebase_config JSON string.", e);
+            firebaseConfig = null;
+        }
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // UI要素
+        const startButton = document.getElementById('start-button');
+        const preliminaryButton = document.getElementById('preliminary-button');
+        const resetButton = document.getElementById('reset-button');
+        const dedicatedWindowButton = document.getElementById('dedicated-window-button');
+        const langButton = document.getElementById('lang-button');
+        const videoFeed = document.getElementById('video-feed');
+        const processingCanvas = document.getElementById('processing-canvas');
+        const displayCanvas = document.getElementById('display-canvas');
+        // processingCtx: 統計処理とWorkerへのデータ転送に使用
+        const processingCtx = processingCanvas.getContext('2d', { willReadFrequently: true });
+        // displayCtx: ユーザーに見せる画像描画に使用
+        const displayCtx = displayCanvas.getContext('2d'); 
+        const userIdSpan = document.getElementById('user-id');
+        const messageContainer = document.getElementById('message-container');
+        const targetFramesInput = document.getElementById('target-frames-input');
+        const displayModeControls = document.getElementById('display-mode-controls');
+        const statsPanel = document.getElementById('stats-panel');
+
+        // 状態変数
+        let currentLang = 'ja';
+        let currentStatusKey = 'statusInitialReady'; 
+        let currentDisplayMode = DISPLAY_MODE.REALTIME; 
+
+        // 計測フローの状態
+        let isMeasuring = false;
+        let isCalibrating = false;
+        let targetCalibFrames = 300; 
+        let currentCalibFrames = 0;  
+
+        // 積算画像用バッファ (メインスレッドで積算を管理)
+        let accumulationData = null; // Float32Array
+        let maxAccumulationValue = 0.0;
+        
+        // Firestore/Auth インスタンス
+        let app, db, auth;
+        let userId = null;
+        let worker = null;
+        let isFirebaseAvailable = true; // Firebaseの状態フラグ
+
+        // フレーム処理の設定
+        const FRAME_RATE = 3; // 3 FPSで処理
+        let frameInterval = null;
+        
+        // Firestoreパス
+        const GLOBAL_STATS_PATH = `artifacts/${appId}/public/data/radiation_stats`;
+        const GLOBAL_STATS_DOC = 'global_summary';
+
+        // ====================================================================
+        // 2. 言語管理とUI更新
+        // ====================================================================
+
+        function setupDisplayModeControls() {
+            displayModeControls.innerHTML = '';
             
-    <div class="status-box">
-        <h2 id="header-calib">キャリブレーション状況 (ノイズ割合)</h2>
-        <p id="progress-status" style="margin-bottom: 15px;">初期化を待機しています...</p>
-        <canvas id="correction-graph" width="300" height="50"></canvas>
-    </div>
+            const modes = [
+                { value: DISPLAY_MODE.REALTIME, labelKey: 'displayModeRealtime' },
+                { value: DISPLAY_MODE.GRAYSCALE, labelKey: 'displayModeGrayscale' },
+                { value: DISPLAY_MODE.COLOR, labelKey: 'displayModeColor' }
+            ];
 
-    <div class="status-box">
-        <h2>補正係数</h2>
-        <div class="factor-display">
-            <span id="g-factor-label">G/R係数:</span>
-            <span id="g-r-factor">1.0000</span>
-        </div>
-        <div class="factor-display">
-            <span id="b-factor-label">B/R係数:</span>
-            <span id="b-r-factor">1.0000</span>
-        </div>
-    </div>
-    
-    <div id="log-area">
-        <div id="log-stream">
-            </div>
-    </div>
-    
-</div>
-    </div>
-    
-    <script src="teramas-cc.js"></script> 
+            modes.forEach(mode => {
+                const id = `mode-${mode.value}`;
+                const label = document.createElement('label');
+                label.className = 'inline-flex items-center cursor-pointer';
+                label.innerHTML = `
+                    <input type="radio" name="display-mode" value="${mode.value}" id="${id}"
+                        class="form-radio h-4 w-4 text-[#38bdf8] bg-gray-700 border-gray-600 focus:ring-[#38bdf8]"
+                        ${mode.value === currentDisplayMode ? 'checked' : ''}>
+                    <span id="${id}-label" class="ml-2 text-gray-300 text-sm">${LANG_PACK[currentLang][mode.labelKey]}</span>
+                `;
+                displayModeControls.appendChild(label);
+            });
+
+            // イベントリスナーを設定
+            document.querySelectorAll('input[name="display-mode"]').forEach(radio => {
+                radio.addEventListener('change', handleDisplayModeChange);
+            });
+        }
+        
+        function setLanguage(lang) {
+            currentLang = lang;
+            const t = LANG_PACK[lang];
+            
+            // Header
+            document.title = t.mainTitle;
+            document.getElementById('main-header').textContent = t.mainTitle;
+            
+            // Buttons
+            langButton.textContent = t.langButton;
+            preliminaryButton.textContent = t.preliminaryButton;
+            startButton.textContent = t.startButton;
+            resetButton.textContent = t.resetButton;
+            dedicatedWindowButton.textContent = t.dedicatedWindowButton;
+
+            // Headers & Labels
+            document.getElementById('status-header').textContent = t.mainHeader;
+            document.getElementById('network-stats-header').textContent = t.networkStatsHeader;
+            document.getElementById('local-stats-header').textContent = t.localStatsHeader;
+            document.getElementById('header-calib').textContent = t.headerCalib;
+            document.getElementById('factor-gr-label').textContent = t.factorGRLabel;
+            document.getElementById('factor-br-label').textContent = t.factorBRLabel;
+            document.getElementById('target-frames-label').textContent = t.targetFramesLabel;
+            document.getElementById('display-mode-label').textContent = t.displayModeLabel;
+
+            // Display Mode Labels (再設定)
+            document.getElementById('mode-REALTIME-label').textContent = t.displayModeRealtime;
+            document.getElementById('mode-GRAYSCALE-label').textContent = t.displayModeGrayscale;
+            document.getElementById('mode-COLOR-label').textContent = t.displayModeColor;
+
+            // 認証/ユーザーID表示の更新
+            if (isFirebaseAvailable) {
+                userIdSpan.textContent = userId || '認証中...';
+            } else {
+                userIdSpan.textContent = t.userIdFallback;
+            }
+
+            // 現在のステータスを新しい言語で再表示
+            if (currentStatusKey === 'statusCalib') {
+                 // キャリブレーション中の場合はフレーム数付きで再表示
+                 showMessage(currentStatusKey, 'warning', currentCalibFrames, targetCalibFrames);
+            } else {
+                showMessage(currentStatusKey, 'info'); 
+            }
+            
+            // Firebase無効メッセージの再表示
+            if (!isFirebaseAvailable) {
+                showMessage(currentStatusKey, 'info', null, null, true); // 既存のメッセージを維持しつつ、追加メッセージを表示
+                const existingWarning = document.getElementById('network-disabled-warning');
+                if (existingWarning) existingWarning.innerHTML = t.networkDisabledMessage;
+            }
+        }
+
+        function showMessage(statusKey, type = 'info', current = null, target = null, keepExisting = false) {
+            const t = LANG_PACK[currentLang];
+            
+            // Firebase接続エラーによる追加警告を処理
+            if (statusKey === 'statusReady' && !isFirebaseAvailable) {
+                const existingWarning = document.getElementById('network-disabled-warning');
+                if (!existingWarning) {
+                    const networkWarning = document.createElement('div');
+                    networkWarning.id = 'network-disabled-warning';
+                    networkWarning.className = 'message-box error mt-4';
+                    networkWarning.innerHTML = t.networkDisabledMessage;
+                    messageContainer.prepend(networkWarning);
+                }
+            }
+            
+            // 既存のステータスメッセージをクリア（追加警告は残す）
+            if (!keepExisting) {
+                // 通常のステータスメッセージのみをクリア
+                const existingNormal = messageContainer.querySelector('.message-box:not(#network-disabled-warning)');
+                if (existingNormal) existingNormal.remove();
+            }
+
+            // ステータスキーの更新
+            currentStatusKey = statusKey;
+            let text = t[statusKey] || statusKey; 
+
+            // %s プレースホルダを置換
+            if (current !== null && target !== null) {
+                text = text.replace(/%s/, current).replace(/%s/, target);
+            }
+
+            // 初期待機ステータスには言語ヒントを追加
+            if (statusKey === 'statusInitialReady') {
+                const hint = t.statusLangHint;
+                text = `<strong>${text}</strong><br><span class="text-xs text-gray-400">${hint}</span>`;
+            }
+
+            // 新しいステータスメッセージの作成
+            const newMsg = document.createElement('div');
+            newMsg.className = `message-box ${type}`;
+            newMsg.innerHTML = text;
+            
+            // 追加警告の上に挿入 (通常メッセージは常に1つだけ)
+            const networkWarning = document.getElementById('network-disabled-warning');
+            if (networkWarning) {
+                messageContainer.insertBefore(newMsg, networkWarning.nextSibling);
+            } else {
+                messageContainer.appendChild(newMsg);
+            }
+        }
+
+        function handleDisplayModeChange(e) {
+            const newMode = e.target.value;
+            currentDisplayMode = newMode;
+            // ステータスメッセージを更新
+            showMessage(`statusDisplayModeChanged_${newMode}`, 'info');
+
+            if (newMode === DISPLAY_MODE.COLOR) {
+                // 未実装であることを警告
+                showMessage(LANG_PACK[currentLang].statusDisplayModeChanged_COLOR, 'warning');
+            }
+        }
+
+        langButton.addEventListener('click', () => {
+            const newLang = currentLang === 'ja' ? 'en' : 'ja';
+            setLanguage(newLang);
+        });
+
+
+        // ====================================================================
+        // 3. Firebase 初期化と認証
+        // ====================================================================
+
+        async function initFirebase() {
+            setupDisplayModeControls(); // ラジオボタンを初期化
+            setLanguage(currentLang); // 初回言語設定
+            showMessage('statusInit', 'info');
+            
+            if (!firebaseConfig) {
+                isFirebaseAvailable = false;
+                console.error("FIREBASE INIT FAILURE: Firebase config is missing or invalid. Skipping network features.");
+                
+                // ネットワーク関連UIを非表示または無効化
+                document.getElementById('network-stats-header').classList.add('opacity-50');
+                document.getElementById('global-frames').textContent = 'N/A';
+                document.getElementById('global-last-update').textContent = 'N/A';
+
+                userIdSpan.textContent = LANG_PACK[currentLang].userIdFallback;
+                
+                preliminaryButton.disabled = false; // ローカル計測は許可
+                resetButton.disabled = false;
+                
+                showMessage('statusReady', 'info');
+                showMessage('statusReady', 'info', null, null, true); // ネットワーク無効メッセージを上に追加
+                return; // Firebase初期化プロセスを終了
+            }
+            
+            isFirebaseAvailable = true;
+
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                    } else {
+                        // 初回認証処理
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                        userId = auth.currentUser.uid;
+                    }
+
+                    userIdSpan.textContent = userId;
+                    preliminaryButton.disabled = false; 
+                    resetButton.disabled = false;
+                    showMessage('statusReady', 'info'); 
+                    setupGlobalStatsListener();
+
+                }, (error) => {
+                    // onAuthStateChangedでのエラー処理
+                    console.error("Firebase Auth State Error:", error);
+                    isFirebaseAvailable = false;
+                    showMessage(`${LANG_PACK[currentLang].statusError}: 認証エラー`, "error");
+                    initFirebase(); // フォールバックモードで再試行 (無限ループ防止のため注意)
+                });
+
+            } catch (error) {
+                console.error("Firebase Initialization Error:", error);
+                // SDKレベルでの初期化失敗
+                isFirebaseAvailable = false;
+                // 強制的にフォールバックモードへ
+                initFirebase();
+            }
+        }
+
+        // ====================================================================
+        // 4. Web Worker (Wasmコアのロジックエミュレーション)
+        // ====================================================================
+
+        // C++ Wasmコアで実行されるはずのロジックをWorker内のJSでエミュレート
+        const workerCode = `
+            const gamma = 2.4; 
+
+            // 逆ガンマ補正 (線形化)
+            function inverseGamma(normalizedValue) {
+                if (normalizedValue <= 0.04045) {
+                    return normalizedValue / 12.92;
+                } else {
+                    return Math.pow((normalizedValue + 0.055) / 1.055, gamma);
+                }
+            }
+
+            function processFrame(imageData) {
+                const data = imageData.data; // RGBA 8bit
+                const pixelCount = data.length / 4;
+                
+                // ----------------------------------------------------
+                // 1. 統計計算用 (簡略化のためRチャネルのみ利用)
+                // ----------------------------------------------------
+                let sumI_stat = 0;
+                let sumISquared_stat = 0;
+                
+                // Rチャネルの統計計算と積算画像用の線形輝度合計を同時に計算
+                const frameAccumulation = new Float32Array(pixelCount); 
+                
+                for (let i = 0; i < data.length; i += 4) {
+                    const pixelIndex = i / 4;
+
+                    // Rチャネルの線形化
+                    const R_linear = inverseGamma(data[i] / 255.0);
+                    // 統計計算用の輝度 (Rチャネルの線形化 * 1000.0)
+                    const I_linear_stat = R_linear * 1000.0; 
+                    
+                    sumI_stat += I_linear_stat;
+                    sumISquared_stat += I_linear_stat * I_linear_stat;
+
+                    // G, Bチャネルの線形化
+                    const G_linear = inverseGamma(data[i + 1] / 255.0);
+                    const B_linear = inverseGamma(data[i + 2] / 255.0);
+                    
+                    // 線形化されたR, G, Bの和を計算し、バッファに格納
+                    // * 1000.0 はスケール調整
+                    frameAccumulation[pixelIndex] = (R_linear + G_linear + B_linear) * 1000.0;
+                }
+                
+                const meanI = sumI_stat / pixelCount; 
+                const meanISquared = sumISquared_stat / pixelCount; 
+                const variance = meanISquared - (meanI * meanI);
+                
+                return {
+                    // 積算用データ (Transferable Object)
+                    frameAccumulationBuffer: frameAccumulation.buffer, 
+                    meanI,
+                    variance,
+                    eventCount: 0 // Phase 1
+                };
+            }
+
+            self.onmessage = function(e) {
+                const { type, imageData } = e.data;
+                
+                if (type === 'PROCESS_FRAME' && imageData) {
+                    const results = processFrame(imageData);
+                    if (results) {
+                        // ArrayBufferを転送し、結果オブジェクトと共に送り返す
+                        self.postMessage({ type: 'RESULT', ...results }, [results.frameAccumulationBuffer]);
+                    }
+                }
+            };
+        `;
+
+        function initializeWorker() {
+            const blob = new Blob([workerCode], { type: 'application/javascript' });
+            worker = new Worker(URL.createObjectURL(blob));
+            showMessage('statusWasmReady', 'info');
+            worker.onmessage = handleWorkerResult;
+            worker.onerror = (e) => console.error("Worker Error:", e);
+        }
+
+        // ====================================================================
+        // 5. メインスレッド処理と計測フロー
+        // ====================================================================
+        
+        // 統計情報をUIに表示し、Firestoreを更新
+        function handleWorkerResult(e) {
+            
+            const { meanI, variance, eventCount, frameAccumulationBuffer } = e.data;
+
+            // 1. 統計情報の更新 (Firebaseの有無に関わらず実行)
+            document.getElementById('local-mean').textContent = meanI.toFixed(4);
+            document.getElementById('local-variance').textContent = variance.toFixed(4);
+            
+            // 2. 積算バッファの更新 (Transferable ObjectをFloat32Arrayとして再利用)
+            if (isMeasuring || isCalibrating) {
+                const frameAccumulation = new Float32Array(frameAccumulationBuffer);
+                
+                // 積算データが初期化されていない場合、初期化
+                if (!accumulationData || accumulationData.length !== frameAccumulation.length) {
+                    accumulationData = new Float32Array(frameAccumulation.length).fill(0.0);
+                    maxAccumulationValue = 0.0;
+                }
+                
+                // 積算処理
+                for (let i = 0; i < frameAccumulation.length; i++) {
+                    accumulationData[i] += frameAccumulation[i];
+                    // 最大積算値を追跡 (リアルタイムスケーリング用)
+                    if (accumulationData[i] > maxAccumulationValue) {
+                        maxAccumulationValue = accumulationData[i];
+                    }
+                }
+            }
+
+            // 3. 予備測定中のフロー制御
+            if (isCalibrating) {
+                currentCalibFrames++;
+                
+                showMessage('statusCalib', 'warning', currentCalibFrames, targetCalibFrames);
+
+                // 完了判定
+                if (currentCalibFrames >= targetCalibFrames) { 
+                    stopMeasurement();
+                    isCalibrating = false;
+                    startButton.disabled = false;
+                    preliminaryButton.disabled = true;
+                    targetFramesInput.disabled = false; 
+                    showMessage('statusCalibDone', 'info');
+                }
+            }
+            
+            // 4. Firebaseが有効な場合のみFirestoreにグローバル統計を更新
+            if (isFirebaseAvailable && db && userId) {
+                 updateGlobalStats(eventCount);
+            }
+
+            // 5. 表示キャンバスの更新 (モードに応じた描画)
+            updateDisplayCanvas();
+        }
+
+        async function startCameraAndLoop() {
+            try {
+                // カメラの最大解像度を優先 (理想値として1920x1080を要求)
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        facingMode: "environment", 
+                        width: { ideal: 1920 }, 
+                        height: { ideal: 1080 } 
+                    } 
+                });
+                
+                videoFeed.srcObject = stream;
+                // videoFeedの解像度が確定するまで待つ
+                await new Promise(resolve => videoFeed.onloadedmetadata = resolve);
+
+                // 取得した**ネイティブ解像度**にキャンバスの内部バッファサイズを設定
+                const videoW = videoFeed.videoWidth;
+                const videoH = videoFeed.videoHeight;
+                processingCanvas.width = videoW;
+                processingCanvas.height = videoH;
+                displayCanvas.width = videoW;
+                displayCanvas.height = videoH;
+                
+                await videoFeed.play();
+                
+                // 描画キャンバスの表示サイズ（CSS）と内部バッファサイズ（Canvas.width/height）を同期させたことをログで確認
+                console.log(`Webカメラのストリームが開始されました。ネイティブ解像度: ${videoW}x${videoH}`);
+                
+                // UI上の表示サイズ（CSS）のアスペクト比を調整
+                // 親要素の幅に合わせて、高さをネイティブ比率に設定
+                const aspectRatio = videoH / videoW;
+                displayCanvas.style.height = `${displayCanvas.offsetWidth * aspectRatio}px`;
+                
+                showMessage('statusCamera', 'info');
+                
+                // フレーム処理ループを開始
+                frameInterval = setInterval(processFrameLoop, 1000 / FRAME_RATE);
+                return true;
+
+            } catch (err) {
+                console.error("Camera Access Error:", err);
+                // テンプレートリテラルの構文エラーを修正
+                const errMsg = LANG_PACK[currentLang].statusInitFailed.replace('%s', 'Camera');
+                showMessage(`${LANG_PACK[currentLang].statusError}: ${errMsg}`, "warning");
+                return false;
+            }
+        }
+
+        function stopMeasurement() {
+             if (frameInterval) {
+                clearInterval(frameInterval);
+                frameInterval = null;
+            }
+            if (videoFeed.srcObject) {
+                videoFeed.srcObject.getTracks().forEach(track => track.stop());
+                videoFeed.srcObject = null;
+            }
+            isMeasuring = false;
+            isCalibrating = false;
+        }
+
+        // 計測フローのハンドラ
+        preliminaryButton.addEventListener('click', async () => {
+            if (isMeasuring || isCalibrating) return showMessage('statusAlreadyInit', 'warning');
+
+            // ユーザー入力から目標フレーム数を取得し、バリデーション
+            const inputVal = parseInt(targetFramesInput.value, 10);
+            targetCalibFrames = Math.max(10, isNaN(inputVal) ? 300 : inputVal); // 最小値10を保証
+            targetFramesInput.value = targetCalibFrames; // UIに正しい値を反映
+            targetFramesInput.disabled = true; // 計測中は変更不可に
+
+            currentCalibFrames = 0; // フレームカウンターをリセット
+            // 積算バッファをリセット
+            accumulationData = null; 
+            maxAccumulationValue = 0.0;
+
+            isCalibrating = true;
+            preliminaryButton.disabled = true;
+            startButton.disabled = true;
+            
+            const cameraStarted = await startCameraAndLoop();
+            if (cameraStarted) {
+                isMeasuring = true; // 計測ループは開始
+                showMessage('statusCalib', 'warning', currentCalibFrames, targetCalibFrames); // 初回表示
+            } else {
+                isCalibrating = false;
+                preliminaryButton.disabled = false;
+                targetFramesInput.disabled = false;
+            }
+        });
+
+        startButton.addEventListener('click', async () => {
+            if (isMeasuring) return showMessage('statusAlreadyInit', 'warning');
+            if (currentStatusKey !== 'statusCalibDone') {
+                return showMessage(LANG_PACK[currentLang].statusError + ": " + LANG_PACK[currentLang].statusReady, 'warning');
+            }
+            
+            // 積算バッファをリセット
+            accumulationData = null;
+            maxAccumulationValue = 0.0;
+
+            // 本計測開始
+            isMeasuring = true;
+            startButton.disabled = true;
+            
+            const cameraStarted = await startCameraAndLoop();
+            if (cameraStarted) {
+                showMessage('statusMeasure', 'info');
+            } else {
+                isMeasuring = false;
+                startButton.disabled = false;
+            }
+        });
+
+        resetButton.addEventListener('click', () => {
+            stopMeasurement();
+            currentCalibFrames = 0; // フレームカウンターもリセット
+            accumulationData = null; // 積算バッファもリセット
+            maxAccumulationValue = 0.0;
+            
+            preliminaryButton.disabled = false;
+            startButton.disabled = true;
+            targetFramesInput.disabled = false; // 設定を再度変更可能に
+            showMessage('statusReset', 'info');
+            
+            // UIをリセット
+            document.getElementById('factor-gr-value').textContent = '1.000';
+            document.getElementById('factor-br-value').textContent = '1.000';
+            document.getElementById('local-mean').textContent = '0.000';
+            document.getElementById('local-variance').textContent = '0.000';
+            
+            // 表示キャンバスの表示サイズをクリア
+            displayCanvas.style.height = 'auto'; 
+            // 表示キャンバスの内部バッファをクリア
+            displayCtx.clearRect(0, 0, displayCanvas.width, displayCanvas.height);
+        });
+
+        dedicatedWindowButton.addEventListener('click', () => {
+             // 単独ウィンドウで開きなおすロジック
+             showMessage('statusWindowInfo', 'info');
+        });
+
+        function processFrameLoop() {
+            if (!isMeasuring && !isCalibrating || !worker) return;
+
+            // 1. ビデオフレームを処理用キャンバスに描画
+            processingCtx.drawImage(videoFeed, 0, 0, processingCanvas.width, processingCanvas.height);
+
+            // 2. ピクセルデータを取得
+            // ImageData.dataのBufferをWorkerに転送するために、新しいImageDataを作成し、そのBufferを取得する
+            const imageData = processingCtx.getImageData(0, 0, processingCanvas.width, processingCanvas.height);
+
+            // 3. データをWeb Workerに転送して処理をオフロード (Transferable Objectsを使用)
+            worker.postMessage({ 
+                type: 'PROCESS_FRAME',
+                imageData: imageData, 
+            }, [imageData.data.buffer]); // Bufferを転送
+        }
+
+        function updateDisplayCanvas() {
+            const W = displayCanvas.width;
+            const H = displayCanvas.height;
+            
+            // 表示キャンバスの内部バッファをクリア
+            displayCtx.clearRect(0, 0, W, H);
+            displayCtx.fillStyle = '#0d1117';
+            displayCtx.fillRect(0, 0, W, H);
+
+            // 描画エリアの計算 (上下フィット、アスペクト比維持)
+            const canvasWidth = displayCanvas.offsetWidth;
+            const canvasHeight = displayCanvas.offsetHeight;
+            const nativeRatio = W / H;
+            const containerRatio = canvasWidth / canvasHeight;
+
+            let drawW, drawH, offsetX, offsetY;
+            
+            if (nativeRatio > containerRatio) {
+                // 映像が横長 (左右に黒帯)
+                drawW = canvasWidth;
+                drawH = canvasWidth / nativeRatio;
+                offsetX = 0;
+                offsetY = (canvasHeight - drawH) / 2;
+            } else {
+                // 映像が縦長または同等 (上下に黒帯、またはぴったりフィット)
+                drawH = canvasHeight;
+                drawW = canvasHeight * nativeRatio;
+                offsetY = 0;
+                offsetX = (canvasWidth - drawW) / 2;
+            }
+
+            switch (currentDisplayMode) {
+                case DISPLAY_MODE.REALTIME:
+                    // 生動画モード: 処理用キャンバスの内容をそのまま表示
+                    // 描画自体は内部バッファに対して行う
+                    displayCtx.drawImage(processingCanvas, 0, 0, W, H);
+                    break;
+
+                case DISPLAY_MODE.GRAYSCALE:
+                    // 白黒積算画像モード: 積算バッファから画像を生成し描画
+                    if (!accumulationData || maxAccumulationValue === 0) {
+                        displayPlaceholder('白黒積算画像 (データ積算待ち)', W, H);
+                        return;
+                    }
+
+                    // グレースケール画像データを作成
+                    const displayImageData = displayCtx.createImageData(W, H);
+                    const data = displayImageData.data;
+                    
+                    const scaleFactor = maxAccumulationValue > 0 ? 255.0 / maxAccumulationValue : 0;
+
+                    for (let i = 0; i < accumulationData.length; i++) {
+                        const pixelIndex = i * 4;
+                        // 積算値をスケーリングして0-255のグレースケール値に変換
+                        const value = Math.min(255, Math.floor(accumulationData[i] * scaleFactor));
+                        
+                        data[pixelIndex] = value;     // R
+                        data[pixelIndex + 1] = value; // G
+                        data[pixelIndex + 2] = value; // B
+                        data[pixelIndex + 3] = 255;   // A (不透明)
+                    }
+                    
+                    displayCtx.putImageData(displayImageData, 0, 0);
+                    break;
+
+                case DISPLAY_MODE.COLOR:
+                    // カラー積算画像モード: (未実装)
+                    displayPlaceholder(LANG_PACK[currentLang].displayModeColor + ' (未実装)', W, H, 'rgba(255, 50, 50, 0.5)');
+                    break;
+            }
+        }
+        
+        function displayPlaceholder(text, W, H, color = 'rgba(255, 255, 255, 0.5)') {
+            displayCtx.fillStyle = color;
+            displayCtx.font = '24px Inter';
+            displayCtx.textAlign = 'center';
+            displayCtx.textBaseline = 'middle';
+            displayCtx.fillText(text, W / 2, H / 2);
+        }
+
+        // ====================================================================
+        // 6. Firestore連携
+        // ====================================================================
+
+        async function updateGlobalStats(newEvents) {
+            // Firebaseが利用可能でない場合は実行しない
+            if (!isFirebaseAvailable || !db || !userId) return;
+
+            const docRef = doc(db, GLOBAL_STATS_PATH, GLOBAL_STATS_DOC);
+            const batchUpdate = {
+                totalFrames: 1, 
+                totalEvents: newEvents, 
+                lastUpdate: new Date().getTime(),
+            };
+
+            try {
+                // ... Firestore update logic
+                const docSnap = await getDoc(docRef);
+                if (docSnap.exists()) {
+                    await updateDoc(docRef, {
+                        totalFrames: docSnap.data().totalFrames + batchUpdate.totalFrames,
+                        totalEvents: docSnap.data().totalEvents + batchUpdate.totalEvents,
+                        lastUpdate: batchUpdate.lastUpdate
+                    });
+                } else {
+                    await setDoc(docRef, batchUpdate);
+                }
+            } catch (error) {
+                console.error("Firestore Update Error:", error);
+                // 更新失敗時も続行
+            }
+        }
+
+        function setupGlobalStatsListener() {
+            // Firebaseが利用可能でない場合はリスナーを設定しない
+            if (!isFirebaseAvailable || !db) return;
+            const docRef = doc(db, GLOBAL_STATS_PATH, GLOBAL_STATS_DOC);
+
+            onSnapshot(docRef, (doc) => {
+                if (doc.exists()) {
+                    const data = doc.data();
+                    document.getElementById('global-frames').textContent = data.totalFrames ? data.totalFrames.toLocaleString() : '0';
+                    if (data.lastUpdate) {
+                        const date = new Date(data.lastUpdate);
+                        document.getElementById('global-last-update').textContent = date.toLocaleTimeString(currentLang === 'ja' ? 'ja-JP' : 'en-US');
+                    }
+                } else {
+                    document.getElementById('global-frames').textContent = '0';
+                    document.getElementById('global-last-update').textContent = 'N/A';
+                }
+            }, (error) => {
+                console.error("Firestore Listener Error:", error);
+            });
+        }
+
+        // ====================================================================
+        // 7. 初期実行
+        // ====================================================================
+
+        window.onload = () => {
+            initializeWorker();
+            initFirebase();
+            
+            if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) {
+                showMessage(LANG_PACK[currentLang].statusInitFailed.replace('%s', 'Camera API'), 'warning');
+            }
+        };
+
+    </script>
 </body>
 </html>
