@@ -18,6 +18,7 @@ let frameHeight = 0;
 
 let isCameraSetupDone = false; // カメラアクセスが完了したかどうか
 let stream = null; // カメラストリームを保持
+let wasmModuleLoaded = false; // Wasmモジュールがロードされたかどうか
 
 // ノイズ閾値（初期値は仮の値）
 const NOISE_MU = 0.05;

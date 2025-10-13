@@ -20,22 +20,25 @@ let height = 0;
  * @brief Wasmモジュールをロードし、初期化関数を実行する
  */
 function loadWasmModule() {
-    // Emscriptenのラッパーファイルをインポート
-    // 注意: Wasmファイルは同じディレクトリにある必要があります。
-    importScripts('./detector_core.js');
+    if (wasmModuleLoaded) {
+        // ★ 既にロードされている場合は何もしないで終了
+        return; 
+    }
 
-    // Emscriptenモジュールをインスタンス化
-    DetectorCore().then((instance) => {
-        Module = instance;
-        // EmbindによるDetectorCoreモジュールをグローバル変数に格納
-        // Moduleオブジェクトにバインドされた関数が格納されていることを期待
-        DetectorCore = Module; 
-        
-        postMessage({ type: 'ready' });
-    }).catch(err => {
-        console.error("Wasmモジュールのロードまたは初期化中にエラー:", err);
-        postMessage({ type: 'error', message: 'Wasm load failed.' });
-    });
+    try {
+        // Emscriptenのラッパーファイルをインポート
+        importScripts('./detector_core.js'); 
+        wasmModuleLoaded = true; // ★ ロード成功フラグを立てる
+
+        // Emscriptenの初期化処理
+        Module.onRuntimeInitialized = () => {
+            postMessage({ cmd: 'init_done' });
+        };
+
+    } catch (e) {
+        console.error("Failed to load Wasm module:", e);
+        postMessage({ cmd: 'error', message: 'Wasm module failed to load.' });
+    }
 }
 
 // =========================================================================
@@ -52,18 +55,7 @@ self.onmessage = (e) => {
             break;
 
         case 'init':
-            if (DetectorCore && !isInitialized) {
-                width = data.width;
-                height = data.height;
-                const mu = data.mu || 0.0;
-                const sigma = data.sigma || 1.0;
-
-                DetectorCore.initialize(width, height);
-                DetectorCore.setNoiseThreshold(mu, sigma);
-                isInitialized = true;
-
-                postMessage({ type: 'initialized', width: width, height: height });
-            }
+            loadWasmModule(); // 指示を出すだけ
             break;
 
         case 'process':
