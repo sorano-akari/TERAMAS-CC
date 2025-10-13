@@ -3,229 +3,76 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title id="main-title">TERAMAS-CC てらますしーしー</title>
-    <!-- 以前存在した外部CSS参照は、描画エラー回避のため削除されました。 -->
-    
-    <style>
-        /* CSSの統合 (ダークモードの再適用) */
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
-        
-        :root {
-            --color-background: #1A1A1A; /* 全体の背景 */
-            --color-panel: #2C2C2C; /* パネルの背景 */
-            --color-text: #E0E0E0; /* 主要な文字色 */
-            --color-primary: #654ff0; /* メインカラー（ボタン、ハイライト） */
-            --color-canvas-bg: #444444; /* プログレスバーの背景 */
-            --color-canvas-fg: #00AA40; /* プログレスバーの色 */
-        }
-
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: var(--color-background);
-            color: var(--color-text);
-            padding: 20px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
-        #main-header {
-            color: var(--color-primary);
-            margin-bottom: 20px;
-        }
-        #main-container {
-            display: flex;
-            gap: 20px;
-            width: 90%;
-            max-width: 1200px;
-        }
-        #left-panel {
-            flex: 2;
-            min-width: 300px;
-        }
-        #right-panel {
-            flex: 1;
-            min-width: 300px;
-        }
-        #video-container {
-            position: relative;
-            width: 100%;
-            height: auto;
-            background-color: #000;
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: 0 0 15px rgba(0, 0, 0, 0.5); /* 影もダークに */
-            aspect-ratio: 4/3; /* 640x480 */
-        }
-        #camera-video, #processing-canvas {
-            width: 100%;
-            height: 100%;
-            display: block;
-            object-fit: cover;
-        }
-        #processing-canvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-            opacity: 1.0; 
-            z-index: 10;
-        }
-        #control-panel, .status-box, #display-mode-panel {
-            background-color: var(--color-panel);
-            color: var(--color-text);
-            padding: 20px;
-            border-radius: 12px;
-            margin-top: 20px;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-        }
-        h2 {
-            color: var(--color-text);
-            border-bottom: 1px solid #444;
-            padding-bottom: 8px;
-            margin-top: 0;
-        }
-        button {
-            background-color: var(--color-primary);
-            color: white;
-            padding: 10px 15px;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: background-color 0.3s;
-            font-weight: bold;
-            margin-right: 10px;
-            margin-top: 5px;
-        }
-        button:hover:not(:disabled) {
-            background-color: #4f3dbd;
-        }
-        button:disabled {
-            background-color: #444;
-            color: #888;
-            cursor: not-allowed;
-        }
-        .factor-display {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 8px;
-            font-size: 1.1em;
-            font-weight: bold;
-        }
-        #correction-graph {
-            background-color: var(--color-canvas-bg);
-            border: 1px solid #444;
-            border-radius: 6px;
-        }
-        .radio-group {
-            display: flex;
-            gap: 15px;
-            margin-top: 10px;
-        }
-        .radio-group input[type="radio"] {
-            display: none;
-        }
-        .radio-group label {
-            padding: 8px 12px;
-            border: 1px solid #444;
-            border-radius: 6px;
-            cursor: pointer;
-            transition: background-color 0.2s, border-color 0.2s;
-        }
-        .radio-group input[type="radio"]:checked + label {
-            background-color: var(--color-primary);
-            color: white;
-            border-color: var(--color-primary);
-        }
-        #log-area {
-            background-color: #111;
-            border: 1px solid #444;
-        }
-        
-        /* Responsive Design */
-        @media (max-width: 768px) {
-            #main-container {
-                flex-direction: column;
-                width: 100%;
-            }
-            #control-panel button {
-                display: block;
-                width: 100%;
-                margin: 5px 0;
-            }
-        }
-    </style>
+    <title>TERAMAS-CC てらますしーしー</title>
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <button id="lang-switch-button">English / 日本語</button>
+    <div class="container">
+        <header class="header">
+            <h1 id="main-header">WebAssembly 放射線計測デモ</h1>
+            <div class="controls-top">
+                <button id="lang-button" class="btn btn-secondary">English / 日本語</button>
+            </div>
 
-    <h1 id="main-header">TERAMAS-CC WebAssembly 放射線計測デモ</h1>
-
-    <div id="main-container">
-        <div id="left-panel">
-            <!-- カメラとキャンバスのコンテナ -->
-            <div id="video-container">
-                <video id="camera-video" autoplay playsinline></video>
-                <!-- 処理結果の可視化レイヤー -->
-                <canvas id="processing-canvas"></canvas>
+            <div class="camera-selection">
+                <select id="camera-select" disabled></select>
+                <button id="connect-camera-button" class="btn btn-primary">カメラ接続開始</button>
             </div>
             
-            <!-- 制御パネル -->
-            <div id="control-panel">
-                <button id="preliminary-measurement-button">予備測定（調整）</button>
-                <button id="start-measurement-button" disabled>計測開始</button> 
-                <button id="reset-button" disabled>初期化・リセット</button>
-                <!-- <button id="dedicated-window-button">単独ウィンドウで開きなおす</button> -->
-            </div>
-            
-            <!-- 表示モードパネル -->
-            <div id="display-mode-panel">
-                <h2 id="header-display-mode">画像表示モード</h2>
-                <div class="radio-group">
-                    <input type="radio" id="mode-realtime" name="displayMode" value="REALTIME" checked>
-                    <label for="mode-realtime" id="label-realtime">直接出力 (検出イベント)</label>
-                    
-                    <input type="radio" id="mode-grayscale" name="displayMode" value="GRAYSCALE">
-                    <label for="mode-grayscale" id="label-grayscale">グレースケール積算画像</label>
-                    
-                    <input type="radio" id="mode-color" name="displayMode" value="COLOR">
-                    <label for="mode-color" id="label-color">カラー積算画像</label>
-                </div>
-            </div>
-        </div>
-
-        <div id="right-panel">
-            
-            <!-- キャリブレーションステータス -->
             <div class="status-box">
-                <h2 id="header-calib">キャリブレーション状況 (ノイズ割合)</h2>
-                <p id="progress-status" style="margin-bottom: 15px;">初期化を待機しています...</p>
-                <canvas id="correction-graph" width="300" height="50"></canvas>
+                <p id="status-message" class="status-initial-ready">カメラ接続を待機しています。</p>
+                <p class="status-hint" id="status-hint-lang">English version is available. Click the English / 日本語 button around left-top to switch.</p>
             </div>
+        </header>
 
-            <!-- 補正係数表示 -->
-            <div class="status-box">
-                <h2>補正係数</h2>
-                <div class="factor-display">
-                    <span id="g-factor-label">G/R係数:</span>
-                    <span id="g-r-factor">1.0000</span>
-                </div>
-                <div class="factor-display">
-                    <span id="b-factor-label">B/R係数:</span>
-                    <span id="b-r-factor">1.0000</span>
-                </div>
+        <main class="main-content">
+            <div class="display-area">
+                <video id="camera-feed" playsinline autoplay muted></video>
+                <canvas id="display-canvas" style="display: none;"></canvas>
             </div>
             
-            <!-- ログストリーム -->
-            <div class="status-box">
-                <h2>システムログ</h2>
-                <div id="log-area" style="height: 200px; overflow-y: scroll; background-color: #111; color: #ecf0f1; padding: 10px; border-radius: 6px;">
-                    <div id="log-stream"></div>
+            <div class="right-panel">
+                <div class="measurement-controls">
+                    <button id="preliminary-button" class="btn btn-action" disabled>予備測定（調整）</button>
+                    <button id="start-button" class="btn btn-primary" disabled>計測開始</button>
+                    <button id="reset-button" class="btn btn-secondary" disabled>初期化・リセット</button>
+                </div>
+
+                <div class="view-mode-selector">
+                    <h3>表示モード</h3>
+                    <div class="radio-group">
+                        <input type="radio" id="mode-live" name="view-mode" value="REALTIME" checked>
+                        <label for="mode-live" id="mode-live-label">カメラ生画像</label><br>
+
+                        <input type="radio" id="mode-grayscale" name="view-mode" value="GRAYSCALE">
+                        <label for="mode-grayscale" id="mode-grayscale-label">グレースケール積算画像</label><br>
+                        
+                        <input type="radio" id="mode-color" name="view-mode" value="COLOR">
+                        <label for="mode-color" id="mode-color-label">カラー積算画像 (未実装)</label>
+                    </div>
+                </div>
+
+                <div class="statistics">
+                    <h2>統計情報</h2>
+                    <p><span id="frame-label">処理済みフレーム数:</span> <span id="frame-count">0</span></p>
+                    <p><span id="event-label">総イベント数:</span> <span id="event-count">0</span></p>
+                    <p><span id="rate-label">計数率:</span> <span id="rate-value">0.000 Hz</span></p>
+                </div>
+
+                <div class="calibration-info">
+                    <h2 id="header-calib">キャリブレーション状況 (ノイズ割合)</h2>
+                    <p><span id="factor-gr-label">G/R係数:</span> <span id="factor-gr-value">1.000</span></p>
+                    <p><span id="factor-br-label">B/R係数:</span> <span id="factor-br-value">1.000</span></p>
+                </div>
+                
+                <div class="utility-controls">
+                    <p class="status-hint">計測安定性の情報がここに入ります。</p>
+                    <button id="dedicated-window-button" class="btn btn-secondary">単独ウィンドウで開きなおす</button>
                 </div>
             </div>
-        </div>
+        </main>
     </div>
-    
-    <!-- スクリプトのロード (モジュールとしてロード) -->
+
     <script src="teramas-cc.js"></script>
-    <script src="detector_worker.js"></script> <!-- Workerをメインスレッドで直接実行するわけではないが、参照として配置 -->
 </body>
 </html>

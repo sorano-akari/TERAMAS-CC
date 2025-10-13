@@ -1,239 +1,171 @@
-// Wasm Core Source: 検出アルゴリズムと高速計算の C++ ソースコード
-
-#include <emscripten.h>
-#include <cstdint>
+#include <vector>
 #include <cmath>
-#include <iostream>
-#include <cstdlib> // malloc/free用
+#include <algorithm>
+#include <emscripten/bind.h>
 
-// Stats構造体のメモリ配置
-// 統計情報はR, G, Bの各チャネル、および総電荷量(Charge = R+G+B)で個別に保持します。
+// カメラのピクセルサイズ
+int g_width = 0;
+int g_height = 0;
+int g_num_pixels = 0;
 
-struct Stats {
-    // R (赤)
-    double sum_R;        // Rピクセル強度の合計
-    double sum_R_sq;     // Rピクセル強度の二乗の合計 (分散計算用)
-    // G (緑)
-    double sum_G;        // Gピクセル強度の合計
-    double sum_G_sq;     // Gピクセル強度の二乗の合計
-    // B (青)
-    double sum_B;        // Bピクセル強度の合計
-    double sum_B_sq;     // Bピクセル強度の二乗の合計
+// 積分データ (Wasmメモリに保持)
+// 1. 積算電荷量マップ (倍精度浮動小数点数)
+std::vector<double> g_charge_map;
+// 2. イベントカウントマップ (uint8_t, 将来のカラーモード用)
+std::vector<uint8_t> g_event_map;
+// 3. ユーザー表示用グレースケール画像 (Uint8)
+std::vector<uint8_t> g_grayscale_image;
+
+// カウンター
+int g_frame_count = 0;
+int g_event_count = 0; // 総イベント数 (将来実装)
+
+// ノイズ閾値
+double g_noise_mu = 0.0;
+double g_noise_sigma = 0.0;
+
+/**
+ * @brief sRGB標準に基づいた非線形な逆ガンマ補正を適用し、線形な輝度値（電荷量に比例）を計算
+ * @param v_8bit 0から255の8ビット整数値
+ * @return 0.0から1.0の線形輝度値 (double)
+ */
+double inverse_gamma_correction(uint8_t v_8bit) {
+    // 0-255を0.0-1.0に正規化
+    double v_norm = static_cast<double>(v_8bit) / 255.0;
+
+    if (v_norm <= 0.04045) {
+        return v_norm / 12.92;
+    } else {
+        // 標準sRGBの逆ガンマ関数: ((V_norm + 0.055) / 1.055) ^ 2.4
+        return std::pow((v_norm + 0.055) / 1.055, 2.4);
+    }
+}
+
+/**
+ * @brief Wasmコアを初期化し、積分マップ用のメモリを確保する
+ * @param width カメラの幅
+ * @param height カメラの高さ
+ */
+void initialize(int width, int height) {
+    if (width <= 0 || height <= 0) return;
+
+    g_width = width;
+    g_height = height;
+    g_num_pixels = width * height;
+
+    // 積分マップの確保とゼロ初期化
+    g_charge_map.assign(g_num_pixels, 0.0);
+    g_event_map.assign(g_num_pixels, 0); // uint8_t
+    g_grayscale_image.assign(g_num_pixels, 0); // グレースケール画像は1ch (RBG入力は3ch)
+
+    g_frame_count = 0;
+    g_event_count = 0;
+}
+
+/**
+ * @brief ノイズ閾値を設定する
+ * @param mu ノイズレベルの平均 (電荷量 Q の単位)
+ * @param sigma ノイズレベルの標準偏差 (電荷量 Q の単位)
+ */
+void setNoiseThreshold(double mu, double sigma) {
+    g_noise_mu = mu;
+    g_noise_sigma = sigma;
+}
+
+/**
+ * @brief Webカメラからキャプチャしたフレームを処理し、積分マップを更新する
+ * @param rgbDataPointer JS側から渡されたRGB 8bitデータのメモリアドレス
+ */
+void processFrame(uintptr_t rgbDataPointer) {
+    if (g_num_pixels == 0) return;
     
-    // Charge (R + G + B の電荷量)
-    double sum_Charge;   // チャネル合計(R+G+B)の総和
-    double sum_Charge_sq;// チャネル合計(R+G+B)の二乗の総和
+    // JSから渡されたRGBデータ (R1 G1 B1 R2 G2 B2 ...)
+    const uint8_t* rgb_data = reinterpret_cast<const uint8_t*>(rgbDataPointer);
     
-    // 共通
-    uint64_t frame_count; // 処理されたフレーム数
-    uint64_t pixel_total; // フレーム内の全ピクセル数 (W*H)
-};
+    // ノイズ判定の閾値 (Q_threshold = mu + 2*sigma)
+    const double q_threshold = g_noise_mu + 2.0 * g_noise_sigma;
 
-// グローバルな統計情報構造体
-// 複数のフレームにわたって積算するために必要
-Stats global_stats = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0};
+    g_frame_count++; // フレーム数をカウント
 
-// --- グローバル補正係数 (初期値 1.0) ---
-// JavaScriptから設定され、検出イベント処理時に使用されます。
-double g_factor = 1.0;
-double b_factor = 1.0;
+    for (int i = 0; i < g_num_pixels; ++i) {
+        int data_index = i * 3; // RGB 3チャンネルなのでインデックスを計算
 
-// --- 画像積算用グローバル変数 ---
-// R, G, Bの各チャネルをfloatで積算するバッファ
-// float (4バイト) を使用することで、Uint8の画像でも高精度な累積が可能
-float* accumulated_image = nullptr; 
-int img_width = 0;
-int img_height = 0;
+        // 1. 線形化 (逆ガンマ補正)
+        double r_linear = inverse_gamma_correction(rgb_data[data_index]);
+        double g_linear = inverse_gamma_correction(rgb_data[data_index + 1]);
+        double b_linear = inverse_gamma_correction(rgb_data[data_index + 2]);
 
-// ---------------------
-// C++関数 (Wasm公開用)
-// ---------------------
+        // 2. 1ピクセル当たりの電荷量 Q を計算 (0.0 から 3.0 の範囲)
+        double q_charge = r_linear + g_linear + b_linear;
 
-/**
- * 統計情報をリセットします。
- */
-extern "C" {
-    EMSCRIPTEN_KEEPALIVE
-    void resetStats() {
-        global_stats = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0};
-        // 係数はリセットしない (キャリブレーションの結果は保持)
-        std::cout << "[Wasm] Stats reset completed." << std::endl;
-    }
-}
+        // 3. 放射線イベント判定と積算
+        if (q_charge > q_threshold) {
+            // 放射線イベントと識別された場合
+            g_charge_map[i] += q_charge;
 
-/**
- * グローバル統計情報構造体へのポインタを返します。
- */
-extern "C" {
-    EMSCRIPTEN_KEEPALIVE
-    Stats* getGlobalStatsPtr() {
-        return &global_stats;
-    }
-}
-
-
-/**
- * JavaScriptから補正係数を受け取り、Wasmコアに設定します。
- * @param gFactor G/R補正係数
- * @param bFactor B/R補正係数
- */
-extern "C" {
-    EMSCRIPTEN_KEEPALIVE
-    void setCalibrationFactors(double gFactor, double bFactor) {
-        g_factor = gFactor;
-        b_factor = bFactor;
-        std::cout << "[Wasm] Calibration factors set: G/R=" << g_factor << ", B/R=" << b_factor << std::endl;
-    }
-}
-
-/**
- * 累積画像バッファを確保・初期化します。
- * この関数は計測開始時に一度だけ呼び出されます。
- * @param width 画像の幅
- * @param height 画像の高さ
- * @return 確保された累積バッファへのポインタ
- */
-extern "C" {
-    EMSCRIPTEN_KEEPALIVE
-    float* allocateAccumulationBuffer(int width, int height) {
-        if (accumulated_image) {
-            // 既に確保されている場合は解放
-            free(accumulated_image);
-            accumulated_image = nullptr;
-        }
-
-        img_width = width;
-        img_height = height;
-
-        // R, G, Bの3チャネルをfloat (4バイト) で積算
-        size_t buffer_size = (size_t)width * height * 3;
-        
-        // Emscriptenのランタイムを通じてメモリを確保
-        accumulated_image = (float*)malloc(buffer_size * sizeof(float));
-
-        if (accumulated_image) {
-            // バッファをゼロクリア
-            for (size_t i = 0; i < buffer_size; ++i) {
-                accumulated_image[i] = 0.0f;
+            // イベントカウントマップをインクリメント（オーバーフロー許容）
+            if (g_event_map[i] < 255) {
+                g_event_map[i]++;
             }
-            std::cout << "[Wasm] Accumulation buffer allocated: " << width << "x" << height << "x3 (Float)" << std::endl;
-            return accumulated_image;
-        } else {
-            std::cerr << "[Wasm] ERROR: Failed to allocate accumulation buffer." << std::endl;
-            return nullptr;
+            g_event_count++; // 総イベント数 (将来実装)
         }
     }
 }
 
 /**
- * 累積バッファを解放します。
+ * @brief 積分マップからユーザー表示用のグレースケール画像を生成し、そのポインターを返す
+ * @return グレースケール画像データ（Uint8）のメモリアドレス
  */
-extern "C" {
-    EMSCRIPTEN_KEEPALIVE
-    void freeAccumulationBuffer() {
-        if (accumulated_image) {
-            free(accumulated_image);
-            accumulated_image = nullptr;
-            img_width = 0;
-            img_height = 0;
-            std::cout << "[Wasm] Accumulation buffer freed." << std::endl;
-        }
+uintptr_t getGrayscaleImagePointer() {
+    if (g_num_pixels == 0) return 0;
+
+    // 1. ChargeMap内の最大値を見つける (スケーリングに必要)
+    double max_charge = 0.0;
+    if (!g_charge_map.empty()) {
+        max_charge = *std::max_element(g_charge_map.begin(), g_charge_map.end());
     }
+
+    // 最大値が0の場合は、全て0でクリアして返す
+    if (max_charge == 0.0) {
+        std::fill(g_grayscale_image.begin(), g_grayscale_image.end(), 0);
+        return reinterpret_cast<uintptr_t>(g_grayscale_image.data());
+    }
+
+    // 2. グレースケール画像を生成 (最大値を255とするスケーリング)
+    for (int i = 0; i < g_num_pixels; ++i) {
+        // (現在の電荷量 / 最大電荷量) * 255.0
+        double scaled_value = (g_charge_map[i] / max_charge) * 255.0;
+        
+        // 0-255に丸めてUint8_tに格納
+        g_grayscale_image[i] = static_cast<uint8_t>(std::round(scaled_value));
+    }
+
+    // Wasmメモリ内の配列の先頭アドレスを返す
+    return reinterpret_cast<uintptr_t>(g_grayscale_image.data());
 }
 
 /**
- * 予備測定時に使用。入力フレームを処理し、R, G, Bチャネルおよび電荷量の統計量を計算・積算します。
- * * @param buffer Uint8ArrayとしてJSから渡される画像データ (RGBA形式)
- * @param width 画像の幅
- * @param height 画像の高さ
- * @return Stats構造体へのポインタ
+ * @brief 処理済みフレーム数を返す
+ * @return 処理済みフレーム数
  */
-extern "C" {
-    EMSCRIPTEN_KEEPALIVE
-    Stats* processFrame(uint8_t* buffer, int width, int height) {
-        
-        // 処理のたびにフレームカウントをインクリメント
-        global_stats.frame_count++;
-        
-        // 初回実行時にピクセル総数を設定
-        if (global_stats.pixel_total == 0) {
-            // RGBAで4バイト/ピクセル
-            global_stats.pixel_total = (uint64_t)width * height;
-        }
-
-        // 画像データのサイズ (ピクセル数 * 4チャネル)
-        size_t data_size = (size_t)width * height * 4;
-        
-        // フレーム内の統計量を計算し、グローバル統計量に積算
-        for (size_t i = 0; i < data_size; i += 4) {
-            // 画素値は0-255の範囲
-            double R = (double)buffer[i];     // 赤チャネル (R)
-            double G = (double)buffer[i + 1]; // 緑チャネル (G)
-            double B = (double)buffer[i + 2]; // 青チャネル (B)
-            // buffer[i + 3] はアルファチャネル (A)
-
-            double Charge = R + G + B;
-            
-            // R, G, Bチャネルの統計量積算
-            global_stats.sum_R += R;
-            global_stats.sum_R_sq += R * R;
-
-            global_stats.sum_G += G;
-            global_stats.sum_G_sq += G * G;
-
-            global_stats.sum_B += B;
-            global_stats.sum_B_sq += B * B;
-            
-            // 電荷量 (Charge) の統計量積算
-            global_stats.sum_Charge += Charge;
-            global_stats.sum_Charge_sq += Charge * Charge;
-        }
-
-        // Stats構造体のポインタを返す
-        return &global_stats;
-    }
+int getFrameCount() {
+    return g_frame_count;
 }
 
 /**
- * 入力フレームを処理し、カラーバランス補正を適用して累積画像バッファに加算します。
- * (この段階では検出は行わず、純粋に積算のみを行います)
- * @param buffer Uint8ArrayとしてJSから渡される画像データ (RGBA形式)
- * @return 成功 (1) / 失敗 (0)
+ * @brief 検出された総イベント数を返す
+ * @return 総イベント数 (将来実装)
  */
-extern "C" {
-    EMSCRIPTEN_KEEPALIVE
-    int accumulateFrame(uint8_t* buffer) {
-        // img_width/heightはallocateAccumulationBufferで設定済みと仮定
-        if (!accumulated_image) {
-             std::cerr << "[Wasm] ERROR: Accumulation buffer not initialized." << std::endl;
-             return 0;
-        }
-        
-        size_t data_size = (size_t)img_width * img_height * 4;
-        size_t acc_index = 0; // accumulated_imageのインデックス (R, G, Bの順)
+int getEventCount() {
+    return g_event_count;
+}
 
-        for (size_t i = 0; i < data_size; i += 4) {
-            // 画素値を取得 (0-255)
-            float R = (float)buffer[i];
-            float G = (float)buffer[i + 1];
-            float B = (float)buffer[i + 2];
-
-            // 1. カラーバランス補正を適用
-            // Rチャネルはそのまま (基準)
-            // GチャネルとBチャネルに係数を乗算
-            float corrected_R = R;
-            float corrected_G = G * (float)g_factor;
-            float corrected_B = B * (float)b_factor;
-
-            // 2. 累積バッファに加算
-            accumulated_image[acc_index++] += corrected_R; // R
-            accumulated_image[acc_index++] += corrected_G; // G
-            accumulated_image[acc_index++] += corrected_B; // B
-        }
-        
-        // 積算が成功したフレームは統計情報のフレーム数をインクリメント
-        global_stats.frame_count++;
-        
-        return 1;
-    }
+// Emscriptenバインディングの設定
+EMSCRIPTEN_BINDINGS(detector_core_module) {
+    emscripten::function("initialize", &initialize);
+    emscripten::function("setNoiseThreshold", &setNoiseThreshold);
+    emscripten::function("processFrame", &processFrame);
+    emscripten::function("getGrayscaleImagePointer", &getGrayscaleImagePointer);
+    emscripten::function("getFrameCount", &getFrameCount);
+    emscripten::function("getEventCount", &getEventCount);
 }
